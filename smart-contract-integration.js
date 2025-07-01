@@ -13,7 +13,8 @@ const { Program, AnchorProvider, web3, utils, BN } = pkg;
 import bs58 from "bs58";
 
 // Gorbagana Network Configuration
-const GORBAGANA_RPC = "https://rpc.gorbagana.wtf/";
+const GORBAGANA_RPC =
+  process.env.GORBAGANA_RPC_URL || "https://rpc.gorbagana.wtf/";
 const connection = new Connection(GORBAGANA_RPC, "processed");
 
 // DEPLOYED Smart Contract Program ID (valid Solana address for demo)

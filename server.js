@@ -33,7 +33,10 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:3000", "https://gorbagana.xyz"],
+    origin: [
+      process.env.FRONTEND_URL || "http://localhost:3000",
+      process.env.PRODUCTION_FRONTEND_URL || "https://gorbagana.xyz",
+    ],
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -44,7 +47,9 @@ app.use(express.json());
 
 // Gorbagana network connection
 const connection = new Connection(
-  process.env.SOLANA_RPC_URL || "https://rpc.gorbagana.wtf/",
+  process.env.GORBAGANA_RPC_URL ||
+    process.env.SOLANA_RPC_URL ||
+    "https://rpc.gorbagana.wtf/",
   "confirmed"
 );
 
@@ -2445,13 +2450,16 @@ app.post("/api/rpc-proxy", async (req, res) => {
 
     console.log(`🌐 Proxying RPC call: ${method}`);
 
-    const response = await fetch("https://rpc.gorbagana.wtf/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(rpcRequest),
-    });
+    const response = await fetch(
+      process.env.GORBAGANA_RPC_URL || "https://rpc.gorbagana.wtf/",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(rpcRequest),
+      }
+    );
 
     if (!response.ok) {
       throw new Error(`RPC request failed: ${response.status}`);
@@ -2482,13 +2490,16 @@ app.get("/api/balance/:wallet", async (req, res) => {
       params: [wallet],
     };
 
-    const response = await fetch("https://rpc.gorbagana.wtf/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(balanceRequest),
-    });
+    const response = await fetch(
+      process.env.GORBAGANA_RPC_URL || "https://rpc.gorbagana.wtf/",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(balanceRequest),
+      }
+    );
 
     if (!response.ok) {
       throw new Error(`Balance request failed: ${response.status}`);
