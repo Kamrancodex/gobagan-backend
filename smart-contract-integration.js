@@ -365,4 +365,46 @@ export default {
   GGOR_MINT: GGOR_MINT.toBase58(),
 };
 
-// Note: Mock balance functions are implemented in the main functions above
+// Mock balance management utilities
+let sharedMockBalances = {};
+
+function loadMockBalances() {
+  // In a real application, this would load from a database or file
+  // For now, keep in memory
+  return sharedMockBalances;
+}
+
+function saveMockBalances(balances) {
+  // In a real application, this would save to a database or file
+  // For now, keep in memory
+  sharedMockBalances = { ...balances };
+}
+
+// Export function to get mock balance from backend
+export function getMockBalanceForWallet(walletAddress) {
+  const balances = loadMockBalances();
+  if (!balances[walletAddress]) {
+    // Initialize with random balance for testing
+    balances[walletAddress] = Math.floor(Math.random() * 20) + 5; // 5-25 GOR
+    saveMockBalances(balances);
+  }
+  return balances[walletAddress];
+}
+
+// Export function to update mock balance from backend
+export function updateMockBalanceForWallet(walletAddress, amount) {
+  const balances = loadMockBalances();
+  if (!balances[walletAddress]) {
+    balances[walletAddress] = 0;
+  }
+  balances[walletAddress] += amount;
+  saveMockBalances(balances);
+  console.log(
+    `💰 [BACKEND] Updated mock balance for ${walletAddress.slice(0, 8)}...: ${
+      amount >= 0 ? "+" : ""
+    }${amount.toFixed(2)} GOR (New total: ${balances[walletAddress].toFixed(
+      2
+    )} GOR)`
+  );
+  return balances[walletAddress];
+}
