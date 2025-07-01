@@ -365,5 +365,4 @@ export default {
   GGOR_MINT: GGOR_MINT.toBase58(),
 };
 
-// Also export named functions for direct import
-export { getMockBalanceForWallet, updateMockBalanceForWallet };
+// Note: Mock balance functions are implemented in the main functions above
