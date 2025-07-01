@@ -6,8 +6,17 @@ import {
 import { distributePrizes } from "./blockchain-rewards.js";
 
 class WordGridRoom {
-  constructor(roomId, betAmount = 1) {
+  constructor(
+    roomId,
+    betAmount = 1,
+    password = null,
+    createdBy = null,
+    isMockMode = false
+  ) {
     this.id = roomId;
+    this.password = password;
+    this.createdBy = createdBy;
+    this.isMockMode = isMockMode;
     this.players = [];
     this.grid = Array(64).fill({
       letter: "",
@@ -19,11 +28,30 @@ class WordGridRoom {
     this.wordsFound = [];
     this.gameTimer = null;
     this.betAmount = betAmount;
-    this.totalPrizePool = betAmount;
+    this.totalPrizePool = 0; // Will be set as players join
     this.startTime = null;
     this.maxPlayers = 2;
     this.gameTimeLimit = 300; // 5 minutes total game time
     this.playerTimeLimit = 150; // 2.5 minutes per player
+    this.createdAt = Date.now();
+  }
+
+  verifyPassword(providedPassword) {
+    if (!this.password) return true; // No password set
+    return this.password === providedPassword;
+  }
+
+  getRoomInfo() {
+    return {
+      id: this.id,
+      hasPassword: !!this.password,
+      betAmount: this.betAmount,
+      playersCount: this.players.length,
+      maxPlayers: this.maxPlayers,
+      gamePhase: this.gamePhase,
+      createdBy: this.createdBy,
+      createdAt: this.createdAt,
+    };
   }
 
   async addPlayer(playerId, socketId, wallet, betAmount = null) {
@@ -234,13 +262,13 @@ class WordGridRoom {
     let finalStandings;
 
     if (winner.score > loser.score) {
-      // Clear winner
+      // Clear winner gets 90% of total pool, loser gets 10%
       finalStandings = [
         {
           wallet: winner.wallet,
           score: winner.score,
           position: 1,
-          prize: this.totalPrizePool * 1.8, // Winner gets 90% of doubled pool
+          prize: this.totalPrizePool * 0.9, // Winner gets 90% of total pool
           wordsFound: this.wordsFound.filter((w) => w.playerId === winner.id)
             .length,
         },
@@ -248,20 +276,20 @@ class WordGridRoom {
           wallet: loser.wallet,
           score: loser.score,
           position: 2,
-          prize: this.totalPrizePool * 0.2, // Loser gets 10% of doubled pool
+          prize: this.totalPrizePool * 0.1, // Loser gets 10% of total pool
           wordsFound: this.wordsFound.filter((w) => w.playerId === loser.id)
             .length,
         },
       ];
     } else {
-      // Tie - split the prize pool
-      const tieAmount = this.totalPrizePool; // Each gets their entry fee back
+      // Tie - split the prize pool equally
+      const halfPool = this.totalPrizePool / 2; // Each gets half of total pool
       finalStandings = [
         {
           wallet: winner.wallet,
           score: winner.score,
           position: 1,
-          prize: tieAmount,
+          prize: halfPool,
           wordsFound: this.wordsFound.filter((w) => w.playerId === winner.id)
             .length,
         },
@@ -269,7 +297,7 @@ class WordGridRoom {
           wallet: loser.wallet,
           score: loser.score,
           position: 1,
-          prize: tieAmount,
+          prize: halfPool,
           wordsFound: this.wordsFound.filter((w) => w.playerId === loser.id)
             .length,
         },
@@ -285,7 +313,7 @@ class WordGridRoom {
 
     // Distribute prizes
     try {
-      await distributePrizes(finalStandings, "wordGrid");
+      await distributePrizes(finalStandings, "wordGrid", this.isMockMode);
       console.log("✅ Word Grid prizes distributed successfully");
     } catch (error) {
       console.error("❌ Error distributing Word Grid prizes:", error);

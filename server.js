@@ -27,8 +27,13 @@ import {
   initializeGame as initSmartContractGame,
   getGameState as getSmartContractGameState,
   validateEntryFeePayment,
+  collectEntryFeeToEscrow,
+  collectValidatedEntryFee,
+  ensurePlatformBalance,
 } from "./smart-contract-integration.js";
 import { WordGridRoom } from "./word-grid-game.js";
+import { setupDemoRoutes } from "./demo-server.js";
+import { setupRealWalletRoutes } from "./real-wallet-server.js";
 
 const app = express();
 const server = createServer(app);
@@ -660,6 +665,11 @@ class TicTacToeRoom {
     };
     this.dbMatch = null; // MongoDB document reference
     this.createdAt = Date.now();
+
+    // Timeout mechanism for no opponent
+    this.waitingTimeout = null;
+    this.timeoutDuration = 5 * 60 * 1000; // 5 minutes in milliseconds
+    this.isTimedOut = false;
   }
 
   async addPlayer(playerId, socketId, wallet, betAmount = null) {
@@ -731,6 +741,11 @@ class TicTacToeRoom {
     if (this.players.length === 2) {
       this.gamePhase = "betting";
       this.calculateBetPool();
+      // Cancel waiting timeout since we found an opponent
+      this.cancelWaitingTimeout();
+    } else if (this.players.length === 1) {
+      // First player joined - start timeout for no opponent
+      this.startWaitingTimeout();
     }
 
     return this.getGameState();
@@ -772,6 +787,8 @@ class TicTacToeRoom {
       // If both players have paid, start coin toss
       if (this.players.every((p) => p.hasPaid)) {
         this.gamePhase = "toss";
+        // Set the first player as the choosing player for coin toss
+        this.coinToss.choosingPlayer = this.players[0].id;
         this.updateBetPool();
       }
     }
@@ -812,6 +829,107 @@ class TicTacToeRoom {
     if (this.players.length < 2) {
       this.resetGame();
     }
+  }
+
+  startWaitingTimeout() {
+    console.log(`⏰ Starting 5-minute timeout for room ${this.roomId}`);
+
+    this.waitingTimeout = setTimeout(() => {
+      this.handleWaitingTimeout();
+    }, this.timeoutDuration);
+  }
+
+  cancelWaitingTimeout() {
+    if (this.waitingTimeout) {
+      console.log(
+        `✅ Canceling waiting timeout for room ${this.roomId} (opponent found)`
+      );
+      clearTimeout(this.waitingTimeout);
+      this.waitingTimeout = null;
+    }
+  }
+
+  async handleWaitingTimeout() {
+    if (this.isTimedOut || this.players.length !== 1) {
+      return; // Already handled or invalid state
+    }
+
+    this.isTimedOut = true;
+    const player = this.players[0];
+
+    console.log(
+      `⏰ Timeout reached for room ${
+        this.roomId
+      } - refunding player ${player.wallet.slice(0, 8)}...`
+    );
+
+    try {
+      // Only refund if player has paid
+      if (player.hasPaid) {
+        console.log(
+          `💰 Refunding ${player.betAmount} gGOR to ${player.wallet.slice(
+            0,
+            8
+          )}...`
+        );
+
+        // Distribute refund via smart contract system
+        const refundWinners = [
+          {
+            rank: 1,
+            wallet: player.wallet,
+            prize: player.betAmount, // Full refund (no platform fee for timeout)
+            score: 0,
+          },
+        ];
+
+        const results = await distributeSmartContractRewards(
+          this.roomId,
+          refundWinners
+        );
+
+        const result = results[0];
+        if (result && result.success) {
+          console.log(`✅ Timeout refund successful! TX: ${result.signature}`);
+        } else {
+          console.error(
+            `❌ Timeout refund failed: ${result?.error || "Unknown error"}`
+          );
+        }
+      }
+
+      // Update database
+      if (this.dbMatch) {
+        await GameMatch.updateOne(
+          { gameId: this.roomId },
+          {
+            $set: {
+              gameState: "timeout",
+              "gameData.timeoutReason": "no_opponent",
+              finishedAt: new Date(),
+            },
+          }
+        );
+      }
+
+      this.gamePhase = "finished";
+      this.winner = "timeout";
+
+      console.log(`🏁 Room ${this.roomId} closed due to timeout`);
+
+      // Signal to remove this room from the rooms map
+      return { shouldRemoveRoom: true, refundedPlayer: player };
+    } catch (error) {
+      console.error(
+        `❌ Error handling timeout for room ${this.roomId}:`,
+        error
+      );
+    }
+  }
+
+  cleanup() {
+    // Clean up any pending timeouts
+    this.cancelWaitingTimeout();
   }
 
   handleCoinChoice(playerId, choice) {
@@ -2178,7 +2296,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("confirmPayment", ({ txSignature, gameId, amount }) => {
+  socket.on("confirmPayment", async ({ txSignature, gameId, amount }) => {
     try {
       const playerInfo = playerSockets.get(socket.id);
       if (!playerInfo || !ticTacToeRooms.has(playerInfo.currentRoom)) return;
@@ -2208,11 +2326,62 @@ io.on("connection", (socket) => {
       console.log(`📝 TX Signature: ${txSignature}`);
       console.log(`💵 Amount: ${amount} gGOR`);
 
+      // NEW: Validate and collect entry fee with transaction verification
+      try {
+        console.log(`🔍 Validating transaction: ${txSignature}`);
+        const validationResult = await validateEntryFeePayment(
+          playerInfo.wallet,
+          room.roomId,
+          txSignature
+        );
+
+        if (validationResult.verified) {
+          console.log(
+            `✅ Transaction validated! Amount detected: ${validationResult.amount} GOR`
+          );
+
+          // Collect the validated entry fee
+          const escrowResult = await collectValidatedEntryFee(
+            playerInfo.wallet,
+            validationResult.amount,
+            room.roomId,
+            txSignature
+          );
+          console.log(
+            `✅ Validated entry fee collected: ${escrowResult.signature}`
+          );
+          console.log(
+            `📊 Virtual escrow pool: ${escrowResult.virtualPool} GOR`
+          );
+        } else {
+          console.error(`❌ Transaction validation failed for ${txSignature}`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to validate/collect entry fee:`, error);
+      }
+
       // If both players have paid, create escrow
       if (room.players.every((p) => p.hasPaid)) {
         console.log(`🏦 Creating escrow for game: ${room.roomId}`);
         console.log(`💰 Total pool: ${room.betPool.totalAmount} gGOR`);
         console.log(`💸 Platform fee: ${room.betPool.platformFee} gGOR`);
+
+        // Check if platform wallet has enough balance for future prize distribution
+        try {
+          const balanceCheck = await ensurePlatformBalance(
+            room.betPool.winnerPayout
+          );
+          if (!balanceCheck.sufficient) {
+            console.log(`⚠️ ${balanceCheck.message}`);
+            console.log(
+              `💡 Send ${balanceCheck.deficit.toFixed(
+                6
+              )} GOR to platform wallet for prizes`
+            );
+          }
+        } catch (error) {
+          console.error(`❌ Failed to check platform balance:`, error);
+        }
       }
     } catch (error) {
       socket.emit("error", { message: error.message });
@@ -2389,28 +2558,143 @@ io.on("connection", (socket) => {
   });
 
   // Word Grid Game Events
+  socket.on("createWordGridRoom", async (data) => {
+    try {
+      const { roomId, password, wallet, betAmount, txSignature, isMockMode } =
+        data;
+
+      console.log(`🔤 Creating Word Grid room: ${roomId}`, {
+        wallet,
+        betAmount,
+        hasPassword: !!password,
+        isMockMode: !!isMockMode,
+      });
+
+      // Check if room already exists
+      if (wordGridRooms.has(roomId)) {
+        throw new Error("Room with this ID already exists");
+      }
+
+      // Create new room with password and mock mode
+      const room = new WordGridRoom(
+        roomId,
+        betAmount,
+        password,
+        wallet,
+        isMockMode
+      );
+      wordGridRooms.set(roomId, room);
+
+      console.log(`✅ Created new Word Grid room: ${roomId} by ${wallet}`);
+
+      // Add the creator as the first player
+      await room.addPlayer(socket.id, socket.id, wallet, betAmount);
+
+      // Confirm payment immediately for testing/mock mode
+      console.log(
+        `🔍 Confirming payment for room creator ${socket.id} in room ${roomId}`
+      );
+      room.confirmPayment(socket.id);
+      console.log(`✅ Payment confirmed for room creator ${socket.id}`);
+
+      // In mock mode, handle mock balance
+      if (isMockMode) {
+        const { handleMockPayment } = await import(
+          "./smart-contract-integration.js"
+        );
+        await handleMockPayment(wallet, betAmount, `wordgrid_create_${roomId}`);
+      }
+
+      socket.join(roomId);
+
+      // Update player socket mapping
+      playerSockets.set(socket.id, {
+        playerId: socket.id,
+        wallet: wallet,
+        currentRoom: roomId,
+        roomType: "wordGrid",
+      });
+
+      console.log(
+        `✅ Room creator joined Word Grid room: ${roomId}, players: ${room.players.length}/${room.maxPlayers}`
+      );
+
+      // Broadcast updated game state
+      io.to(roomId).emit("wordGridGameState", room.getGameState());
+    } catch (error) {
+      console.error("❌ Error creating Word Grid room:", error);
+      socket.emit("wordGridError", { message: error.message });
+    }
+  });
+
+  socket.on("getWordGridRoomInfo", async (data) => {
+    try {
+      const { roomId, password } = data;
+
+      console.log(`🔍 Getting Word Grid room info: ${roomId}`);
+
+      const room = wordGridRooms.get(roomId);
+      if (!room) {
+        throw new Error("Room not found");
+      }
+
+      // Verify password if provided
+      if (!room.verifyPassword(password)) {
+        throw new Error("Invalid room password");
+      }
+
+      const roomInfo = room.getRoomInfo();
+      socket.emit("wordGridRoomInfo", roomInfo);
+    } catch (error) {
+      console.error("❌ Error getting Word Grid room info:", error);
+      socket.emit("wordGridError", { message: error.message });
+    }
+  });
+
   socket.on("joinWordGridGame", async (data) => {
     try {
-      const { roomId, wallet, betAmount, txSignature } = data;
+      const { roomId, password, wallet, txSignature, isMockMode } = data;
 
       console.log(`🔤 Player joining Word Grid room: ${roomId}`, {
         wallet,
-        betAmount,
+        hasPassword: !!password,
+        isMockMode: !!isMockMode,
       });
 
-      let room = wordGridRooms.get(roomId);
+      const room = wordGridRooms.get(roomId);
 
       if (!room) {
-        // Create new room
-        room = new WordGridRoom(roomId, betAmount);
-        wordGridRooms.set(roomId, room);
-        console.log(`✅ Created new Word Grid room: ${roomId}`);
+        throw new Error(
+          "Room not found. Please check the room ID or create a new room."
+        );
       }
 
-      await room.addPlayer(socket.id, socket.id, wallet, betAmount);
+      // Verify password
+      if (!room.verifyPassword(password)) {
+        throw new Error("Invalid room password");
+      }
+
+      // Use the room's bet amount (both players must pay the same)
+      await room.addPlayer(socket.id, socket.id, wallet, room.betAmount);
 
       // Confirm payment immediately for testing
+      console.log(
+        `🔍 Confirming payment for player ${socket.id} in room ${roomId}`
+      );
       room.confirmPayment(socket.id);
+      console.log(`✅ Payment confirmed for player ${socket.id}`);
+
+      // In mock mode, handle mock balance
+      if (isMockMode) {
+        const { handleMockPayment } = await import(
+          "./smart-contract-integration.js"
+        );
+        await handleMockPayment(
+          wallet,
+          room.betAmount,
+          `wordgrid_join_${roomId}`
+        );
+      }
 
       socket.join(roomId);
 
@@ -2432,9 +2716,30 @@ io.on("connection", (socket) => {
       // Start game if room is full
       if (room.players.length === room.maxPlayers) {
         console.log(`🚀 Starting Word Grid game in room: ${roomId}`);
+        console.log(`🔍 Room state before start:`, {
+          playersCount: room.players.length,
+          players: room.players.map((p) => ({
+            id: p.id,
+            wallet: p.wallet,
+            paymentConfirmed: p.paymentConfirmed,
+          })),
+          gamePhase: room.gamePhase,
+        });
 
-        const gameState = room.startGame();
-        io.to(roomId).emit("wordGridGameStarted", gameState);
+        try {
+          const gameState = room.startGame();
+          console.log(`✅ Game started successfully in room: ${roomId}`);
+          io.to(roomId).emit("wordGridGameStarted", gameState);
+          io.to(roomId).emit("wordGridGameState", gameState);
+        } catch (error) {
+          console.error(
+            `❌ Error starting Word Grid game in room ${roomId}:`,
+            error.message
+          );
+          io.to(roomId).emit("wordGridError", {
+            message: `Failed to start game: ${error.message}`,
+          });
+        }
       }
     } catch (error) {
       console.error("❌ Error joining Word Grid game:", error);
@@ -2689,6 +2994,30 @@ app.get("/api/balance/:wallet", async (req, res) => {
   }
 });
 
+// Mock balance endpoint for demo mode
+app.get("/api/mock-balance/:wallet", async (req, res) => {
+  try {
+    const { wallet } = req.params;
+    const { getMockBalanceForWallet } = await import(
+      "./smart-contract-integration.js"
+    );
+
+    const balance = getMockBalanceForWallet(wallet);
+    res.json({
+      wallet,
+      balance,
+      isMock: true,
+      message: "Mock balance - for demo purposes only",
+    });
+  } catch (error) {
+    console.error("Error getting mock balance:", error);
+    res.status(500).json({
+      error: "Failed to get mock balance",
+      message: error.message,
+    });
+  }
+});
+
 // Health check endpoint
 app.get("/health", (req, res) => {
   res.json({
@@ -2779,11 +3108,86 @@ app.get("/user/:wallet", async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
+// Timeout management for tic-tac-toe rooms
+function checkForTimeouts() {
+  const now = Date.now();
+  const roomsToRemove = [];
+
+  for (const [roomId, room] of ticTacToeRooms) {
+    // Only check rooms with exactly one player waiting for an opponent
+    if (room.players.length === 1 && room.gamePhase === "betting") {
+      const waitingTime = now - room.createdAt;
+
+      // Check if room has been waiting for more than 5 minutes
+      if (waitingTime > room.timeoutDuration) {
+        console.log(
+          `⏰ Found timed out room: ${roomId} (waiting ${Math.floor(
+            waitingTime / 1000
+          )}s)`
+        );
+
+        // Trigger timeout handling
+        room
+          .handleWaitingTimeout()
+          .then((result) => {
+            if (result && result.shouldRemoveRoom) {
+              // Notify the player about the timeout and refund
+              const player = result.refundedPlayer;
+              if (player && player.socketId) {
+                const playerSocket = io.sockets.sockets.get(player.socketId);
+                if (playerSocket) {
+                  playerSocket.emit("ticTacToeTimeout", {
+                    reason: "no_opponent",
+                    message:
+                      "No opponent found within 5 minutes. You have been refunded.",
+                    refundAmount: player.betAmount,
+                    redirectTo: "/games", // Redirect back to games list
+                  });
+
+                  // Remove player from room
+                  playerSocket.leave(roomId);
+                }
+              }
+
+              // Mark room for removal
+              roomsToRemove.push(roomId);
+            }
+          })
+          .catch((error) => {
+            console.error(
+              `❌ Error handling timeout for room ${roomId}:`,
+              error
+            );
+          });
+      }
+    }
+  }
+
+  // Remove timed out rooms
+  roomsToRemove.forEach((roomId) => {
+    console.log(`🗑️ Removing timed out room: ${roomId}`);
+    const room = ticTacToeRooms.get(roomId);
+    if (room) {
+      room.cleanup(); // Clean up any remaining timeouts
+      ticTacToeRooms.delete(roomId);
+    }
+  });
+}
+
+// Run timeout check every 30 seconds
+setInterval(checkForTimeouts, 30000);
+
 // Initialize server with MongoDB connection
 const startServer = async () => {
   try {
     // Connect to MongoDB
     await connectDB();
+
+    // Setup demo routes (completely separate from real wallet games)
+    setupDemoRoutes(app, io);
+
+    // Setup real wallet routes (blockchain-integrated games)
+    setupRealWalletRoutes(app, io);
 
     // Start the server
     server.listen(PORT, () => {
@@ -2792,6 +3196,7 @@ const startServer = async () => {
       console.log(`🔗 Gorbagana testnet integration ready`);
       console.log(`📋 Game Configuration:`, GAME_CONFIG);
       console.log(`🔗 Smart contracts ready for blockchain transactions`);
+      console.log(`🎭 Demo routes initialized for mock gameplay`);
     });
   } catch (error) {
     console.error("❌ Failed to start server:", error);

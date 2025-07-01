@@ -27,7 +27,17 @@ function initializePlatformWallet() {
   }
 
   try {
-    const secretKey = bs58.decode(PLATFORM_PRIVATE_KEY);
+    let secretKey;
+
+    // Try JSON format first (array of numbers)
+    if (PLATFORM_PRIVATE_KEY.startsWith("[")) {
+      const privateKeyBytes = JSON.parse(PLATFORM_PRIVATE_KEY);
+      secretKey = new Uint8Array(privateKeyBytes);
+    } else {
+      // Try base58 format
+      secretKey = bs58.decode(PLATFORM_PRIVATE_KEY);
+    }
+
     platformWallet = Keypair.fromSecretKey(secretKey);
     console.log(
       `🔑 Platform wallet loaded: ${platformWallet.publicKey.toBase58()}`
@@ -35,6 +45,9 @@ function initializePlatformWallet() {
     return platformWallet;
   } catch (error) {
     console.error("❌ Failed to load platform wallet:", error);
+    console.error(
+      "   Make sure PLATFORM_PRIVATE_KEY is in correct format (JSON array or base58)"
+    );
     return null;
   }
 }
