@@ -28,6 +28,7 @@ import {
   getGameState as getSmartContractGameState,
   validateEntryFeePayment,
 } from "./smart-contract-integration.js";
+import { WordGridRoom } from "./word-grid-game.js";
 
 const app = express();
 const server = createServer(app);
@@ -35,14 +36,30 @@ const io = new Server(server, {
   cors: {
     origin: [
       process.env.FRONTEND_URL || "http://localhost:3000",
-      process.env.PRODUCTION_FRONTEND_URL || "https://gorbagana.xyz",
+      process.env.PRODUCTION_FRONTEND_URL ||
+        "https://gorbagana-taupe.vercel.app",
+      "https://gorbagana-taupe.vercel.app",
+      "https://gorbagana.xyz",
+      "https://gorbagana-frontend.vercel.app",
     ],
     methods: ["GET", "POST"],
     credentials: true,
   },
 });
 
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      process.env.FRONTEND_URL || "http://localhost:3000",
+      process.env.PRODUCTION_FRONTEND_URL ||
+        "https://gorbagana-taupe.vercel.app",
+      "https://gorbagana-taupe.vercel.app",
+      "https://gorbagana.xyz",
+      "https://gorbagana-frontend.vercel.app",
+    ],
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 // Gorbagana network connection
@@ -1764,6 +1781,7 @@ const lobby = new Lobby();
 const playerSockets = new Map();
 const ticTacToeRooms = new Map();
 const orbCollectorRooms = new Map();
+const wordGridRooms = new Map();
 
 // Make io globally accessible for lobby countdown
 let globalIo;
@@ -2370,6 +2388,125 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Word Grid Game Events
+  socket.on("joinWordGridGame", async (data) => {
+    try {
+      const { roomId, wallet, betAmount, txSignature } = data;
+
+      console.log(`🔤 Player joining Word Grid room: ${roomId}`, {
+        wallet,
+        betAmount,
+      });
+
+      let room = wordGridRooms.get(roomId);
+
+      if (!room) {
+        // Create new room
+        room = new WordGridRoom(roomId, betAmount);
+        wordGridRooms.set(roomId, room);
+        console.log(`✅ Created new Word Grid room: ${roomId}`);
+      }
+
+      await room.addPlayer(socket.id, socket.id, wallet, betAmount);
+
+      // Confirm payment immediately for testing
+      room.confirmPayment(socket.id);
+
+      socket.join(roomId);
+
+      // Update player socket mapping
+      playerSockets.set(socket.id, {
+        playerId: socket.id,
+        wallet: wallet,
+        currentRoom: roomId,
+        roomType: "wordGrid",
+      });
+
+      console.log(
+        `✅ Player joined Word Grid room: ${roomId}, players: ${room.players.length}/${room.maxPlayers}`
+      );
+
+      // Broadcast updated game state
+      io.to(roomId).emit("wordGridGameState", room.getGameState());
+
+      // Start game if room is full
+      if (room.players.length === room.maxPlayers) {
+        console.log(`🚀 Starting Word Grid game in room: ${roomId}`);
+
+        const gameState = room.startGame();
+        io.to(roomId).emit("wordGridGameStarted", gameState);
+      }
+    } catch (error) {
+      console.error("❌ Error joining Word Grid game:", error);
+      socket.emit("wordGridError", { message: error.message });
+    }
+  });
+
+  socket.on("placeWordGridLetter", (data) => {
+    try {
+      const { roomId, cellIndex, letter } = data;
+      const room = wordGridRooms.get(roomId);
+
+      if (!room) {
+        socket.emit("wordGridError", { message: "Room not found" });
+        return;
+      }
+
+      const result = room.placeLetter(socket.id, cellIndex, letter);
+
+      console.log(
+        `📝 Letter placed in Word Grid ${roomId}: ${letter} at cell ${cellIndex}`,
+        {
+          newWords: result.newWords.map((w) => w.word),
+          nextPlayer: result.nextPlayer,
+        }
+      );
+
+      // Broadcast letter placement
+      io.to(roomId).emit("wordGridLetterPlaced", result);
+
+      // Clear isNewWord flags after 3 seconds
+      setTimeout(() => {
+        room.grid.forEach((cell) => {
+          if (cell.isNewWord) {
+            cell.isNewWord = false;
+          }
+        });
+
+        io.to(roomId).emit("wordGridGameState", room.getGameState());
+      }, 3000);
+    } catch (error) {
+      console.error("❌ Error placing Word Grid letter:", error);
+      socket.emit("wordGridError", { message: error.message });
+    }
+  });
+
+  socket.on("wordGridTimeOut", (data) => {
+    try {
+      const { roomId } = data;
+      const room = wordGridRooms.get(roomId);
+
+      if (!room) {
+        socket.emit("wordGridError", { message: "Room not found" });
+        return;
+      }
+
+      console.log(`⏰ Time out in Word Grid room: ${roomId}`);
+      room.finishGame("timeout").then((result) => {
+        io.to(roomId).emit("wordGridGameFinished", result);
+
+        // Clean up room after 30 seconds
+        setTimeout(() => {
+          wordGridRooms.delete(roomId);
+          console.log(`🧹 Cleaned up Word Grid room: ${roomId}`);
+        }, 30000);
+      });
+    } catch (error) {
+      console.error("❌ Error handling Word Grid timeout:", error);
+      socket.emit("wordGridError", { message: error.message });
+    }
+  });
+
   socket.on("disconnect", () => {
     console.log("🔌 Client disconnected:", socket.id);
 
@@ -2428,6 +2565,22 @@ io.on("connection", (socket) => {
             "🧹 Cleaned up empty orb collector room:",
             playerInfo.currentRoom
           );
+        }
+      } else if (wordGridRooms.has(playerInfo.currentRoom)) {
+        // Handle Word Grid room cleanup
+        const room = wordGridRooms.get(playerInfo.currentRoom);
+        const wasEmpty = room.removePlayer(playerInfo.playerId);
+
+        if (wasEmpty) {
+          room.cleanup();
+          wordGridRooms.delete(playerInfo.currentRoom);
+          console.log(
+            "🧹 Cleaned up empty Word Grid room:",
+            playerInfo.currentRoom
+          );
+        } else {
+          // Broadcast updated state to remaining players
+          io.to(room.id).emit("wordGridGameState", room.getGameState());
         }
       }
 
@@ -2544,6 +2697,7 @@ app.get("/health", (req, res) => {
     activeGames: gameRooms.size,
     ticTacToeRooms: ticTacToeRooms.size,
     orbCollectorRooms: orbCollectorRooms.size,
+    wordGridRooms: wordGridRooms.size,
     lobbyPlayers: lobby.players.size,
     connectedSockets: playerSockets.size,
     blockchain: {
