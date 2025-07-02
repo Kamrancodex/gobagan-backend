@@ -18,7 +18,8 @@
     "express": "^4.18.2",
     "mongoose": "^7.5.0",
     "socket.io": "^4.7.2",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "word-list-json": "^0.2.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

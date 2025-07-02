@@ -15,6 +15,11 @@ import {
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import bs58 from "bs58";
+import {
+  isValidWord,
+  detectNewWords,
+  findWordsInGrid,
+} from "./word-dictionary.js";
 
 // Real Gorbagana Network Configuration
 const GORBAGANA_RPC =
@@ -54,7 +59,886 @@ if (PLATFORM_PRIVATE_KEY) {
   }
 }
 
+// Storage for word grid rooms (other room types declared elsewhere)
+const realWalletWordGridRooms = new Map();
+
 // Real wallet game classes with blockchain integration
+class RealWalletWordGridRoom {
+  constructor(
+    roomId,
+    betAmount = 1,
+    password = null,
+    creatorWallet = null,
+    io = null
+  ) {
+    this.roomId = roomId;
+    this.betAmount = betAmount;
+    this.password = password;
+    this.creatorWallet = creatorWallet;
+    this.io = io; // 🚨 CRITICAL: Store socket.io instance for broadcasting
+    this.maxPlayers = 2;
+    this.players = [];
+    this.gamePhase = "waiting"; // waiting, countdown, playing, finished
+    this.currentPlayer = null;
+    this.gameStartTime = null;
+    this.totalGameTime = 150; // 150 seconds (2.5 minutes) TOTAL per player for entire game
+    this.countdownTimer = null;
+    this.turnTimer = null;
+    this.gameTimer = null;
+
+    // 8x8 word grid
+    this.grid = Array(64)
+      .fill(null)
+      .map(() => ({
+        letter: "",
+        playerId: null,
+        isNewWord: false,
+      }));
+
+    this.wordHistory = [];
+    this.moveHistory = [];
+    this.totalEscrowed = 0;
+
+    console.log(
+      `🔤 Created Real Word Grid room: ${roomId} with bet ${betAmount} GOR`
+    );
+  }
+
+  verifyPassword(inputPassword) {
+    if (!this.password) return true;
+    return this.password === inputPassword;
+  }
+
+  async addPlayer(playerId, socketId, wallet, betAmount = null) {
+    if (this.players.length >= this.maxPlayers) {
+      throw new Error("Room is full");
+    }
+
+    if (this.gamePhase !== "waiting") {
+      throw new Error("Game already in progress");
+    }
+
+    if (!wallet || typeof wallet !== "string" || wallet.trim() === "") {
+      throw new Error("Valid wallet address is required");
+    }
+
+    const existingPlayer = this.players.find((p) => p.wallet === wallet);
+    if (existingPlayer) {
+      throw new Error("Player already in room");
+    }
+
+    const finalBetAmount = betAmount || this.betAmount;
+    const nickname = wallet.length >= 8 ? `${wallet.slice(0, 8)}...` : wallet;
+
+    const player = {
+      id: playerId,
+      socketId: socketId,
+      wallet: wallet,
+      nickname: nickname,
+      betAmount: finalBetAmount,
+      score: 0,
+      timeRemaining: this.totalGameTime, // Total time for entire game
+      turnStartTime: null, // Track when current turn started
+      totalTimeUsed: 0, // Track total time used across all turns
+      isActive: false,
+      paymentConfirmed: false,
+      escrowTxSignature: null,
+      wordsFound: [],
+      totalLettersPlaced: 0,
+      longestWord: 0,
+      isCreator: wallet === this.creatorWallet, // Track room creator
+    };
+
+    this.players.push(player);
+
+    console.log(
+      `🔤 Player ${wallet.slice(0, 8)}... joined Word Grid room ${
+        this.roomId
+      } (${this.players.length}/${this.maxPlayers})`
+    );
+
+    return this.getGameState();
+  }
+
+  async confirmPayment(playerId, txSignature) {
+    const player = this.players.find((p) => p.id === playerId);
+    if (!player) {
+      throw new Error("Player not found");
+    }
+
+    if (player.paymentConfirmed) {
+      console.log(`⚠️ Player ${player.wallet} payment already confirmed`);
+      return this.getGameState();
+    }
+
+    try {
+      // Verify the transaction on blockchain
+      const verified = await this.verifyPaymentTransaction(
+        player.wallet,
+        txSignature,
+        player.betAmount
+      );
+
+      if (verified) {
+        player.paymentConfirmed = true;
+        player.escrowTxSignature = txSignature;
+        this.totalEscrowed += player.betAmount;
+
+        console.log(
+          `💰 Word Grid payment confirmed: ${player.betAmount} GOR from ${player.wallet}`
+        );
+        console.log(`   Transaction: ${txSignature}`);
+        console.log(`   Total escrowed: ${this.totalEscrowed} GOR`);
+
+        // Check if all players have paid
+        const allPaid = this.players.every((p) => p.paymentConfirmed);
+        const enoughPlayers = this.players.length === this.maxPlayers;
+
+        if (allPaid && enoughPlayers) {
+          console.log(
+            `🚀 All Word Grid players paid - starting 10-second countdown`
+          );
+          this.startCountdown();
+        }
+
+        return { success: true, verified: true };
+      } else {
+        return { success: false, error: "Payment verification failed" };
+      }
+    } catch (error) {
+      console.error("❌ Word Grid payment confirmation error:", error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async verifyPaymentTransaction(playerWallet, txSignature, expectedAmount) {
+    try {
+      console.log(`🔍 Verifying Word Grid payment: ${txSignature}`);
+
+      const transaction = await connection.getTransaction(txSignature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+
+      if (!transaction) {
+        console.log("❌ Transaction not found");
+        return false;
+      }
+
+      if (transaction.meta?.err) {
+        console.log("❌ Transaction failed:", transaction.meta.err);
+        return false;
+      }
+
+      // Verify payment amount and recipients
+      const preBalances = transaction.meta.preBalances;
+      const postBalances = transaction.meta.postBalances;
+      const accountKeys = transaction.transaction.message.accountKeys.map(
+        (key) => key.toBase58()
+      );
+
+      const playerIndex = accountKeys.indexOf(playerWallet);
+      const platformIndex = accountKeys.indexOf(
+        platformWallet.publicKey.toBase58()
+      );
+
+      if (playerIndex === -1) {
+        console.log("❌ Player wallet not found in transaction");
+        return false;
+      }
+
+      const playerBalanceChange =
+        (postBalances[playerIndex] - preBalances[playerIndex]) /
+        Math.pow(10, GOR_DECIMALS);
+
+      console.log(`💰 Player balance change: ${playerBalanceChange} GOR`);
+
+      // Player should have lost at least the expected amount (negative change)
+      return Math.abs(playerBalanceChange) >= expectedAmount * 0.95; // 5% tolerance for fees
+    } catch (error) {
+      console.error("❌ Transaction verification error:", error);
+      return false;
+    }
+  }
+
+  startCountdown() {
+    if (this.gamePhase !== "waiting") return;
+
+    this.gamePhase = "countdown";
+    let countdown = 10;
+
+    console.log(
+      `⏱️ Starting 10-second countdown for Word Grid room ${this.roomId}`
+    );
+
+    this.countdownTimer = setInterval(() => {
+      countdown--;
+
+      if (countdown <= 0) {
+        clearInterval(this.countdownTimer);
+
+        // Start the game and broadcast the updated state
+        const gameState = this.startGame();
+        console.log(`📡 Broadcasting word grid game started event`);
+
+        // This should be handled by the socket handler that manages this room
+        // The broadcasting will be done in the main server socket handlers
+      }
+    }, 1000);
+  }
+
+  startGame() {
+    if (this.players.length !== this.maxPlayers) {
+      throw new Error("Need exactly 2 players to start");
+    }
+
+    if (!this.players.every((p) => p.paymentConfirmed)) {
+      throw new Error("All players must confirm payment first");
+    }
+
+    this.gamePhase = "playing";
+    this.gameStartTime = Date.now();
+
+    // Room creator goes first (player with isCreator = true)
+    const creator = this.players.find((p) => p.isCreator);
+    const firstPlayer = creator || this.players[0]; // Fallback to first player
+
+    this.currentPlayer = firstPlayer.id;
+    firstPlayer.isActive = true;
+    firstPlayer.turnStartTime = Date.now(); // Start tracking turn time
+
+    // Make sure other players are inactive and have no active timer
+    this.players.forEach((player) => {
+      if (player.id !== firstPlayer.id) {
+        player.isActive = false;
+      }
+    });
+
+    console.log(`🚀 Word Grid game started in room ${this.roomId}`);
+    console.log(`🎯 Creator goes first: ${firstPlayer.wallet.slice(0, 8)}...`);
+
+    this.startTurnTimer();
+
+    // 🚨 CRITICAL: Broadcast game state after starting
+    const gameState = this.getGameState();
+    console.log(`📡 Broadcasting game started state to all players`);
+
+    // Broadcast to all players in the room
+    if (this.io) {
+      this.io.to(this.roomId).emit("wordGridGameStarted", gameState);
+      this.io.to(this.roomId).emit("wordGridState", gameState);
+      console.log(`✅ Game state broadcasted to room ${this.roomId}`);
+    } else {
+      console.warn(`⚠️ No socket.io instance available for broadcasting`);
+    }
+
+    return gameState;
+  }
+
+  startTurnTimer() {
+    if (this.turnTimer) {
+      clearInterval(this.turnTimer);
+    }
+
+    this.turnTimer = setInterval(() => {
+      const activePlayer = this.players.find(
+        (p) => p.id === this.currentPlayer
+      );
+      if (!activePlayer || !activePlayer.turnStartTime) return;
+
+      // Calculate time used in current turn
+      const currentTurnTime = Math.floor(
+        (Date.now() - activePlayer.turnStartTime) / 1000
+      );
+      const totalTimeUsed = activePlayer.totalTimeUsed + currentTurnTime;
+
+      // Update remaining time
+      activePlayer.timeRemaining = Math.max(
+        0,
+        this.totalGameTime - totalTimeUsed
+      );
+
+      if (activePlayer.timeRemaining <= 0) {
+        console.log(
+          `⏰ Player ${activePlayer.wallet.slice(
+            0,
+            8
+          )}... ran out of time! Total used: ${totalTimeUsed}s`
+        );
+        this.switchTurn();
+      }
+    }, 1000);
+  }
+
+  placeLetter(playerId, cellIndex, letter) {
+    if (this.gamePhase !== "playing") {
+      throw new Error("Game is not in playing state");
+    }
+
+    if (this.currentPlayer !== playerId) {
+      throw new Error("Not your turn");
+    }
+
+    if (cellIndex < 0 || cellIndex >= 64) {
+      throw new Error("Invalid cell index");
+    }
+
+    if (this.grid[cellIndex].letter !== "") {
+      throw new Error("Cell already occupied");
+    }
+
+    if (!/^[A-Z]$/i.test(letter)) {
+      throw new Error("Letter must be A-Z");
+    }
+
+    const upperLetter = letter.toUpperCase();
+    const currentPlayerObj = this.players.find((p) => p.id === playerId);
+
+    // Place the letter
+    this.grid[cellIndex] = {
+      letter: upperLetter,
+      playerId: playerId,
+      isNewWord: false,
+    };
+
+    // Record the move
+    this.moveHistory.push({
+      playerId: playerId,
+      cellIndex: cellIndex,
+      letter: upperLetter,
+      timestamp: Date.now(),
+      moveNumber: this.moveHistory.length + 1,
+    });
+
+    currentPlayerObj.totalLettersPlaced++;
+
+    console.log(
+      `📝 Letter '${upperLetter}' placed at cell ${cellIndex} by ${currentPlayerObj.wallet.slice(
+        0,
+        8
+      )}...`
+    );
+
+    // 🚨 NEW COMPREHENSIVE WORD DETECTION
+    // Check ENTIRE GRID in ALL DIRECTIONS every time
+    const allCurrentWords = this.findAllWordsInGrid();
+
+    // Get previously found words (just the word strings)
+    const previousWordStrings = this.wordHistory.map((w) =>
+      w.word.toUpperCase()
+    );
+
+    // Find truly NEW words (not previously counted)
+    const newWords = allCurrentWords.filter(
+      (wordObj) => !previousWordStrings.includes(wordObj.word.toUpperCase())
+    );
+
+    let pointsEarned = 0;
+    if (newWords.length > 0) {
+      console.log(
+        `🎉 NEW words found in entire grid:`,
+        newWords.map((w) => `${w.word} (${w.word.length}pts)`)
+      );
+      console.log(
+        `📊 Total words in grid: ${allCurrentWords.length}, Previously found: ${previousWordStrings.length}, New: ${newWords.length}`
+      );
+
+      // Mark cells that are part of new words
+      newWords.forEach((wordObj) => {
+        wordObj.coordinates.forEach((cellIdx) => {
+          if (this.grid[cellIdx]) {
+            this.grid[cellIdx].isNewWord = true;
+          }
+        });
+      });
+
+      // Add new words to history
+      const wordsToAdd = newWords.map((w) => ({
+        word: w.word,
+        points: w.word.length, // Points = word length
+        coordinates: w.coordinates,
+        direction: w.direction,
+        playerId: playerId, // Player who completed this word gets the points
+        timestamp: Date.now(),
+      }));
+
+      this.wordHistory.push(...wordsToAdd);
+
+      // Award points to the current player (player who placed the completing letter)
+      pointsEarned = newWords.reduce((sum, w) => sum + w.word.length, 0);
+      currentPlayerObj.score += pointsEarned;
+      currentPlayerObj.wordsFound.push(...newWords.map((w) => w.word));
+
+      // Track longest word
+      const longestNewWord = Math.max(...newWords.map((w) => w.word.length));
+      if (longestNewWord > currentPlayerObj.longestWord) {
+        currentPlayerObj.longestWord = longestNewWord;
+      }
+
+      console.log(
+        `🏆 Player ${currentPlayerObj.wallet.slice(
+          0,
+          8
+        )}... earned ${pointsEarned} points for ${
+          newWords.length
+        } new words! Total: ${currentPlayerObj.score}`
+      );
+    } else {
+      console.log(
+        `📝 No new words found (grid has ${allCurrentWords.length} total words, all previously counted)`
+      );
+    }
+
+    // Switch to next player
+    this.switchTurn();
+
+    // Check if game should end (grid full)
+    const emptySpots = this.grid.filter((cell) => cell.letter === "").length;
+    if (emptySpots === 0) {
+      console.log(`🏁 Word Grid game ending - grid is full`);
+      setTimeout(() => this.finishGame("grid_full"), 1000);
+    }
+
+    return {
+      grid: this.grid,
+      players: this.players,
+      nextPlayer: this.currentPlayer,
+      moveNumber: this.moveHistory.length,
+      emptySpots: emptySpots,
+      newWords: newWords || [],
+      pointsEarned: pointsEarned,
+    };
+  }
+
+  switchTurn() {
+    // Stop current timer
+    if (this.turnTimer) {
+      clearInterval(this.turnTimer);
+    }
+
+    // Save time used by current player
+    const currentPlayerObj = this.players.find(
+      (p) => p.id === this.currentPlayer
+    );
+    if (currentPlayerObj && currentPlayerObj.turnStartTime) {
+      const turnTimeUsed = Math.floor(
+        (Date.now() - currentPlayerObj.turnStartTime) / 1000
+      );
+      currentPlayerObj.totalTimeUsed += turnTimeUsed;
+      currentPlayerObj.timeRemaining = Math.max(
+        0,
+        this.totalGameTime - currentPlayerObj.totalTimeUsed
+      );
+      currentPlayerObj.isActive = false;
+      currentPlayerObj.turnStartTime = null;
+
+      console.log(
+        `⏱️ Player ${currentPlayerObj.wallet.slice(
+          0,
+          8
+        )}... used ${turnTimeUsed}s this turn, ${
+          currentPlayerObj.totalTimeUsed
+        }s total, ${currentPlayerObj.timeRemaining}s remaining`
+      );
+    }
+
+    // Find next player
+    const currentIndex = this.players.findIndex(
+      (p) => p.id === this.currentPlayer
+    );
+    const nextIndex = (currentIndex + 1) % this.players.length;
+    const nextPlayer = this.players[nextIndex];
+
+    // Check if next player has time left
+    if (nextPlayer.timeRemaining <= 0) {
+      console.log(
+        `⏰ Next player ${nextPlayer.wallet.slice(
+          0,
+          8
+        )}... has no time left! Game ending...`
+      );
+
+      // Award time bonus to current player (1 point per second remaining)
+      if (currentPlayerObj && currentPlayerObj.timeRemaining > 0) {
+        const timeBonus = Math.floor(currentPlayerObj.timeRemaining);
+        currentPlayerObj.score += timeBonus;
+        console.log(
+          `⏱️ Time bonus: +${timeBonus} points to ${currentPlayerObj.wallet.slice(
+            0,
+            8
+          )}... (${currentPlayerObj.timeRemaining}s remaining)`
+        );
+
+        // Broadcast the score update
+        if (this.io) {
+          this.io.to(this.roomId).emit("wordGridState", this.getGameState());
+        }
+      }
+
+      setTimeout(() => this.finishGame("time_up"), 1000);
+      return;
+    }
+
+    this.currentPlayer = nextPlayer.id;
+    nextPlayer.isActive = true;
+    nextPlayer.turnStartTime = Date.now(); // Start tracking new turn
+
+    console.log(
+      `🔄 Turn switched to ${nextPlayer.wallet.slice(0, 8)}... (${
+        nextPlayer.timeRemaining
+      }s remaining)`
+    );
+
+    // Start timer for new player
+    this.startTurnTimer();
+
+    // 🚨 CRITICAL: Broadcast turn change
+    if (this.io) {
+      const gameState = this.getGameState();
+      this.io.to(this.roomId).emit("wordGridState", gameState);
+      console.log(`📡 Turn switch broadcasted to room ${this.roomId}`);
+    }
+  }
+
+  async finishGame(reason = "normal") {
+    console.log(
+      `🏁 Word Grid game finishing in room ${this.roomId}, reason: ${reason}`
+    );
+
+    this.gamePhase = "finished";
+
+    // Stop all timers
+    if (this.gameTimer) clearInterval(this.gameTimer);
+    if (this.turnTimer) clearInterval(this.turnTimer);
+    if (this.countdownTimer) clearInterval(this.countdownTimer);
+
+    // If game ended due to time, award final time bonuses
+    if (reason === "time_up") {
+      this.players.forEach((player) => {
+        if (player.timeRemaining > 0) {
+          const timeBonus = Math.floor(player.timeRemaining);
+          player.score += timeBonus;
+          console.log(
+            `⏱️ Final time bonus: +${timeBonus} points to ${player.wallet.slice(
+              0,
+              8
+            )}... (${player.timeRemaining}s remaining)`
+          );
+        }
+      });
+    }
+
+    // Calculate final scores and rankings
+    const sortedPlayers = [...this.players].sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.longestWord !== a.longestWord) return b.longestWord - a.longestWord;
+      return b.totalLettersPlaced - a.totalLettersPlaced;
+    });
+
+    // Assign final rankings
+    sortedPlayers.forEach((player, index) => {
+      player.finalRank = index + 1;
+    });
+
+    const winner = sortedPlayers[0];
+    const loser = sortedPlayers[1];
+    const betPool = this.calculateBetPool();
+
+    const gameStats = {
+      winner: winner,
+      loser: loser,
+      reason: reason,
+      finalStandings: sortedPlayers.map((player) => ({
+        wallet: player.wallet,
+        rank: player.finalRank,
+        score: player.score,
+        wordsFound: player.wordsFound.length,
+        longestWord: player.longestWord,
+        totalLettersPlaced: player.totalLettersPlaced,
+        timeRemaining: player.timeRemaining,
+        betAmount: player.betAmount,
+        prize: player.finalRank === 1 ? betPool.prizePool : 0,
+      })),
+      betPool: betPool,
+      roomId: this.roomId,
+    };
+
+    console.log(
+      `🏆 Word Grid Winner: ${winner.wallet.slice(0, 8)}... with ${
+        winner.score
+      } points (${loser.score} vs ${winner.score})`
+    );
+    console.log(
+      `💰 Prize: ${betPool.prizePool} GOR to winner, Platform fee: ${betPool.platformFee} GOR`
+    );
+
+    // Broadcast final results
+    if (this.io) {
+      this.io.to(this.roomId).emit("wordGridGameFinished", gameStats);
+    }
+
+    // Distribute prizes
+    try {
+      await this.distributePrizes(gameStats);
+    } catch (error) {
+      console.error(`❌ Failed to distribute Word Grid prizes:`, error);
+    }
+
+    return gameStats;
+  }
+
+  calculateBetPool() {
+    const totalBets = this.players.reduce(
+      (sum, player) => sum + player.betAmount,
+      0
+    );
+    const platformFee = totalBets * 0.1; // 10% platform fee
+
+    return {
+      totalAmount: totalBets,
+      platformFee: platformFee,
+      prizePool: totalBets - platformFee,
+    };
+  }
+
+  async distributePrizes(gameStats) {
+    if (!platformWallet) {
+      console.error("❌ Platform wallet required for prize distribution");
+      return;
+    }
+
+    try {
+      const winner = gameStats.winner;
+      const loser = gameStats.loser;
+      const prizeAmount = gameStats.betPool.prizePool;
+      const platformFee = gameStats.betPool.platformFee;
+
+      console.log(`🎯 WORD GRID PRIZE DISTRIBUTION:`);
+      console.log(
+        `   Winner: ${winner.wallet.slice(0, 8)}... (${winner.score} points)`
+      );
+      console.log(
+        `   Loser: ${loser.wallet.slice(0, 8)}... (${loser.score} points)`
+      );
+      console.log(`   Total Pool: ${gameStats.betPool.totalAmount} GOR`);
+      console.log(`   Platform Fee (10%): ${platformFee} GOR`);
+      console.log(`   Winner Prize (90%): ${prizeAmount} GOR`);
+
+      if (prizeAmount > 0) {
+        const txSignature = await this.sendPrizeToPlayer(
+          winner.wallet,
+          prizeAmount
+        );
+        console.log(`✅ Word Grid prize sent successfully!`);
+        console.log(`   Amount: ${prizeAmount} GOR`);
+        console.log(`   To: ${winner.wallet}`);
+        console.log(`   TX: ${txSignature}`);
+
+        return {
+          success: true,
+          winner: winner.wallet,
+          amount: prizeAmount,
+          txSignature: txSignature,
+        };
+      } else {
+        console.log(`⚠️ No prize to distribute (amount: ${prizeAmount})`);
+        return { success: false, reason: "No prize amount" };
+      }
+    } catch (error) {
+      console.error("❌ Word Grid prize distribution error:", error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async sendPrizeToPlayer(playerWallet, amount) {
+    try {
+      const playerPublicKey = new PublicKey(playerWallet);
+      const amountLamports = Math.floor(amount * Math.pow(10, GOR_DECIMALS));
+
+      console.log(
+        `💸 Sending ${amount} GOR (${amountLamports} lamports) to ${playerWallet.slice(
+          0,
+          8
+        )}...`
+      );
+
+      const transaction = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: platformWallet.publicKey,
+          toPubkey: playerPublicKey,
+          lamports: amountLamports,
+        })
+      );
+
+      const signature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [platformWallet]
+      );
+
+      console.log(
+        `✅ Prize sent: ${amount} GOR to ${playerWallet.slice(0, 8)}...`
+      );
+      console.log(`   Transaction: ${signature}`);
+      return signature;
+    } catch (error) {
+      console.error(`❌ Failed to send prize to ${playerWallet}:`, error);
+      throw error;
+    }
+  }
+
+  // 🚨 COMPREHENSIVE WORD DETECTION - ALL DIRECTIONS & LENGTHS
+  findAllWordsInGrid() {
+    const words = [];
+    const gridSize = 8;
+
+    // Helper to get letter at row/col
+    const getLetter = (row, col) => {
+      if (row < 0 || row >= gridSize || col < 0 || col >= gridSize) return "";
+      return this.grid[row * gridSize + col]?.letter || "";
+    };
+
+    // Check for words in all directions and all possible lengths
+    const checkAllWordsFromPosition = (startRow, startCol) => {
+      if (!getLetter(startRow, startCol)) return;
+
+      // All 8 directions
+      const directions = [
+        [0, 1], // right
+        [1, 0], // down
+        [1, 1], // diagonal down-right
+        [1, -1], // diagonal down-left
+        [0, -1], // left
+        [-1, 0], // up
+        [-1, -1], // diagonal up-left
+        [-1, 1], // diagonal up-right
+      ];
+
+      directions.forEach(([dr, dc]) => {
+        // Try different word lengths (2 to 8 letters)
+        for (let length = 2; length <= 8; length++) {
+          let word = "";
+          let coordinates = [];
+          let valid = true;
+
+          // Build word of specific length in this direction
+          for (let i = 0; i < length; i++) {
+            const row = startRow + dr * i;
+            const col = startCol + dc * i;
+            const letter = getLetter(row, col);
+
+            if (!letter) {
+              valid = false;
+              break;
+            }
+
+            word += letter;
+            coordinates.push(row * gridSize + col);
+          }
+
+          // Check if this word is valid
+          if (valid && word.length >= 2 && isValidWord(word)) {
+            words.push({
+              word: word.toUpperCase(),
+              coordinates: coordinates,
+              direction: `${dr},${dc}`,
+              startPos: `${startRow},${startCol}`,
+            });
+          }
+        }
+      });
+    };
+
+    // Check from every position in the grid
+    for (let row = 0; row < gridSize; row++) {
+      for (let col = 0; col < gridSize; col++) {
+        checkAllWordsFromPosition(row, col);
+      }
+    }
+
+    // Remove duplicates - same word in same positions
+    const uniqueWords = [];
+    const seen = new Set();
+
+    words.forEach((wordObj) => {
+      const key = `${wordObj.word}:${wordObj.coordinates
+        .sort((a, b) => a - b)
+        .join(",")}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniqueWords.push(wordObj);
+      }
+    });
+
+    // Sort by word length (longer words first) then alphabetically
+    uniqueWords.sort((a, b) => {
+      if (a.word.length !== b.word.length) {
+        return b.word.length - a.word.length;
+      }
+      return a.word.localeCompare(b.word);
+    });
+
+    console.log(
+      `🔍 Found ${uniqueWords.length} unique valid words:`,
+      uniqueWords
+        .slice(0, 10)
+        .map((w) => `${w.word}(${w.word.length})`)
+        .join(", ") + (uniqueWords.length > 10 ? "..." : "")
+    );
+
+    return uniqueWords;
+  }
+
+  cleanup() {
+    if (this.gameTimer) clearInterval(this.gameTimer);
+    if (this.turnTimer) clearInterval(this.turnTimer);
+    if (this.countdownTimer) clearInterval(this.countdownTimer);
+    console.log(`🔤 Cleaned up Word Grid room ${this.roomId}`);
+  }
+
+  getGameState() {
+    const gameState = {
+      roomId: this.roomId,
+      gamePhase: this.gamePhase,
+      players: this.players.map((p) => ({
+        id: p.id,
+        wallet: p.wallet,
+        nickname: p.nickname,
+        score: p.score,
+        timeRemaining: p.timeRemaining,
+        isActive: p.isActive,
+        paymentConfirmed: p.paymentConfirmed,
+        isCreator: p.isCreator,
+        totalLettersPlaced: p.totalLettersPlaced,
+        longestWord: p.longestWord,
+      })),
+      grid: this.grid,
+      currentPlayer: this.currentPlayer,
+      betAmount: this.betAmount,
+      hasPassword: !!this.password,
+      wordHistory: this.wordHistory,
+      moveHistory: this.moveHistory,
+      totalEscrowed: this.totalEscrowed,
+    };
+
+    // 🚨 DEBUG LOGGING - Remove after fixing
+    console.log("🔍 GAME STATE DEBUG:", {
+      roomId: this.roomId,
+      gamePhase: this.gamePhase,
+      currentPlayer: this.currentPlayer,
+      players: this.players.map((p) => ({
+        id: p.id,
+        wallet: p.wallet.slice(0, 8),
+        active: p.isActive,
+        time: p.timeRemaining,
+        isCreator: p.isCreator,
+      })),
+    });
+
+    return gameState;
+  }
+}
+
 class RealWalletTicTacToeRoom {
   constructor(roomId, betAmount = 1) {
     this.roomId = roomId;
@@ -389,7 +1273,7 @@ class RealWalletOrbCollectorRoom {
       throw new Error("Room is full");
     }
 
-    if (this.gameState !== "waiting") {
+    if (this.gameState !== "waiting" && this.gameState !== "paying") {
       throw new Error("Game already in progress");
     }
 
@@ -503,8 +1387,18 @@ class RealWalletOrbCollectorRoom {
     this.gameState = "countdown";
     this.countdownTime = 5;
 
+    console.log(`🔮 Starting countdown for orb collector room ${this.roomId}`);
+
     const countdown = setInterval(() => {
       this.countdownTime--;
+      console.log(`🔮 Countdown: ${this.countdownTime} seconds remaining`);
+
+      // Broadcast countdown updates
+      if (realWalletIo) {
+        const gameState = this.getGameState();
+        realWalletIo.to(this.roomId).emit("realOrbGameState", gameState);
+      }
+
       if (this.countdownTime <= 0) {
         clearInterval(countdown);
         this.startGame();
@@ -517,8 +1411,25 @@ class RealWalletOrbCollectorRoom {
     this.timeRemaining = 60;
     this.spawnInitialOrbs();
 
+    console.log(
+      `🔮 Starting orb collector game ${this.roomId} with ${this.players.length} players`
+    );
+
+    // Broadcast initial game state when game starts
+    if (realWalletIo) {
+      const gameState = this.getGameState();
+      realWalletIo.to(this.roomId).emit("realOrbGameState", gameState);
+    }
+
     this.gameTimer = setInterval(() => {
       this.timeRemaining--;
+
+      // Broadcast periodic updates during gameplay
+      if (this.timeRemaining % 5 === 0 && realWalletIo) {
+        const gameState = this.getGameState();
+        realWalletIo.to(this.roomId).emit("realOrbGameState", gameState);
+      }
+
       if (this.timeRemaining <= 0) {
         this.endGame();
       }
@@ -609,6 +1520,17 @@ class RealWalletOrbCollectorRoom {
       `🏁 Real wallet orb game ended, winner: ${this.leaderboard[0]?.walletAddress}`
     );
 
+    // Broadcast final game state
+    if (realWalletIo) {
+      const gameState = this.getGameState();
+      realWalletIo.to(this.roomId).emit("realOrbGameState", gameState);
+      realWalletIo.to(this.roomId).emit("gameEnd", {
+        gameId: this.roomId,
+        leaderboard: this.leaderboard,
+        totalEscrowed: this.totalEscrowed,
+      });
+    }
+
     // Distribute prizes
     await this.distributePrizes();
   }
@@ -620,31 +1542,25 @@ class RealWalletOrbCollectorRoom {
 
     try {
       const prizePool = this.totalEscrowed;
-      const platformFee = prizePool * 0.1;
-      const totalPrizes = prizePool - platformFee;
+      const platformFee = prizePool * 0.1; // 10% platform fee
+      const winnerPrize = prizePool - platformFee; // 90% to winner
 
       console.log(
         `🏆 Distributing orb collector prizes for game ${this.roomId}`
       );
       console.log(`   Total pool: ${prizePool} GOR`);
       console.log(`   Platform fee: ${platformFee} GOR`);
-      console.log(`   Prize pool: ${totalPrizes} GOR`);
+      console.log(`   Winner prize: ${winnerPrize} GOR`);
 
-      // Prize distribution: 50% to winner, 30% to 2nd, 20% to 3rd
-      const prizeDistribution = [0.5, 0.3, 0.2];
-
-      for (let i = 0; i < Math.min(this.leaderboard.length, 3); i++) {
-        const player = this.leaderboard[i];
-        const prize = totalPrizes * prizeDistribution[i];
-
-        if (prize > 0) {
-          await this.sendPrizeToPlayer(player.walletAddress, prize);
-          console.log(
-            `🎉 Rank ${i + 1}: ${player.walletAddress} receives ${prize.toFixed(
-              2
-            )} GOR`
-          );
-        }
+      // Winner takes all (like tic-tac-toe)
+      const winner = this.leaderboard[0];
+      if (winner && winnerPrize > 0) {
+        await this.sendPrizeToPlayer(winner.walletAddress, winnerPrize);
+        console.log(
+          `🎉 Winner: ${winner.walletAddress} receives ${winnerPrize.toFixed(
+            2
+          )} GOR`
+        );
       }
     } catch (error) {
       console.error("❌ Orb collector prize distribution error:", error);
@@ -701,8 +1617,12 @@ const realWalletTicTacToeRooms = new Map();
 const realWalletOrbCollectorRooms = new Map();
 const realWalletPlayerSockets = new Map();
 
+// Store io instance for broadcasting from room classes
+let realWalletIo = null;
+
 // Setup real wallet routes
 export function setupRealWalletRoutes(app, io) {
+  realWalletIo = io; // Store io instance for room classes
   console.log("🔗 Setting up REAL WALLET routes...");
 
   if (!platformWallet) {
@@ -847,15 +1767,23 @@ export function setupRealWalletRoutes(app, io) {
     // Real Orb Collector Events
     socket.on("joinRealOrbGame", async (data) => {
       try {
-        const { playerId, playerNickname, betAmount } = data;
+        const { playerId, playerNickname, betAmount, txSignature } = data;
 
         if (playerId.startsWith("demo_")) return; // Not a real wallet request
 
         console.log(`🔮 Real orb collector join:`, { playerId, betAmount });
 
-        // Find or create real orb room
+        // REQUIRE transaction signature for payment verification
+        if (!txSignature) {
+          socket.emit("error", { message: "Transaction signature required" });
+          return;
+        }
+
+        // Find or create real orb room (looking for rooms in "waiting" or "paying" state)
         let room = Array.from(realWalletOrbCollectorRooms.values()).find(
-          (r) => r.gameState === "waiting" && r.players.length < 6
+          (r) =>
+            (r.gameState === "waiting" || r.gameState === "paying") &&
+            r.players.length < 6
         );
 
         if (!room) {
@@ -874,9 +1802,30 @@ export function setupRealWalletRoutes(app, io) {
           roomType: "realOrbCollector",
         });
 
-        io.to(room.roomId).emit("realOrbGameState", room.getGameState());
+        // VERIFY PAYMENT BEFORE ALLOWING GAMEPLAY
+        const paymentResult = await room.confirmPayment(socket.id, txSignature);
+        if (paymentResult.success) {
+          console.log(
+            `✅ Orb collector payment confirmed for ${playerId.slice(0, 8)}...`
+          );
+          io.to(room.roomId).emit("realOrbGameState", room.getGameState());
+        } else {
+          console.log(
+            `❌ Orb collector payment failed: ${paymentResult.error}`
+          );
+          socket.emit("paymentError", paymentResult.error);
+
+          // Remove player from room if payment failed
+          const playerIndex = room.players.findIndex((p) => p.id === socket.id);
+          if (playerIndex !== -1) {
+            room.players.splice(playerIndex, 1);
+          }
+          realWalletPlayerSockets.delete(socket.id);
+          return;
+        }
       } catch (error) {
         console.error("❌ Real orb collector join error:", error);
+        socket.emit("error", { message: error.message });
       }
     });
 
@@ -898,12 +1847,274 @@ export function setupRealWalletRoutes(app, io) {
       }
     });
 
+    // Real Word Grid Events
+    socket.on("createWordGridRoom", async (data) => {
+      try {
+        const { roomId, password, betAmount, wallet, txSignature } = data;
+
+        // Only handle real wallet addresses (not demo/mock)
+        if (wallet.startsWith("demo_") || wallet.startsWith("mock_")) {
+          return;
+        }
+
+        console.log(`🔤 Creating Word Grid room:`, {
+          roomId,
+          betAmount,
+          wallet: wallet.slice(0, 8) + "...",
+        });
+
+        // Check if room already exists
+        if (realWalletWordGridRooms.has(roomId)) {
+          socket.emit("error", { message: "Room already exists" });
+          return;
+        }
+
+        // IMPORTANT: Only create room AFTER successful payment
+        if (!txSignature) {
+          socket.emit("error", { message: "Transaction signature required" });
+          return;
+        }
+
+        // First verify payment BEFORE creating room
+        console.log(`🔍 Verifying payment before creating room...`);
+
+        // Create temporary room instance to verify payment
+        const tempRoom = new RealWalletWordGridRoom(
+          roomId,
+          betAmount,
+          password,
+          wallet
+        );
+        const paymentValid = await tempRoom.verifyPaymentTransaction(
+          wallet,
+          txSignature,
+          betAmount
+        );
+
+        if (!paymentValid) {
+          console.log(`❌ Payment verification failed for room creation`);
+          socket.emit("error", { message: "Payment verification failed" });
+          return;
+        }
+
+        console.log(`✅ Payment verified, creating room ${roomId}`);
+
+        // NOW create and store the room after successful payment
+        const room = new RealWalletWordGridRoom(
+          roomId,
+          betAmount,
+          password,
+          wallet,
+          io // 🚨 CRITICAL: Pass socket.io instance for broadcasting
+        );
+        realWalletWordGridRooms.set(roomId, room);
+
+        // Add creator to room
+        await room.addPlayer(socket.id, socket.id, wallet, betAmount);
+        socket.join(roomId);
+
+        realWalletPlayerSockets.set(socket.id, {
+          playerId: socket.id,
+          wallet: wallet,
+          currentRoom: roomId,
+          roomType: "realWordGrid",
+        });
+
+        // Confirm payment (already verified)
+        const result = await room.confirmPayment(socket.id, txSignature);
+        if (result.success) {
+          console.log(`✅ Room creator payment confirmed for ${roomId}`);
+        } else {
+          console.log(`❌ Room creator payment failed: ${result.error}`);
+          // Clean up failed room
+          realWalletWordGridRooms.delete(roomId);
+          realWalletPlayerSockets.delete(socket.id);
+          socket.emit("error", { message: result.error });
+          return;
+        }
+
+        socket.emit("wordGridRoomCreated", {
+          success: true,
+          roomId: roomId,
+          gameState: room.getGameState(),
+        });
+
+        console.log(`✅ Word Grid room ${roomId} created successfully`);
+      } catch (error) {
+        console.error("❌ Word Grid room creation error:", error);
+        socket.emit("error", { message: error.message });
+      }
+    });
+
+    socket.on("joinWordGridRoom", async (data) => {
+      try {
+        const { roomId, password, wallet, betAmount, txSignature } = data;
+
+        // Only handle real wallet addresses
+        if (wallet.startsWith("demo_") || wallet.startsWith("mock_")) {
+          return;
+        }
+
+        console.log(`🔤 Joining Word Grid room:`, {
+          roomId,
+          wallet: wallet.slice(0, 8) + "...",
+        });
+
+        const room = realWalletWordGridRooms.get(roomId);
+        if (!room) {
+          socket.emit("error", { message: "Room not found" });
+          return;
+        }
+
+        // Verify password if required
+        if (!room.verifyPassword(password)) {
+          socket.emit("error", { message: "Invalid room password" });
+          return;
+        }
+
+        // Add player to room
+        await room.addPlayer(socket.id, socket.id, wallet, betAmount);
+        socket.join(roomId);
+
+        realWalletPlayerSockets.set(socket.id, {
+          playerId: socket.id,
+          wallet: wallet,
+          currentRoom: roomId,
+          roomType: "realWordGrid",
+        });
+
+        // Confirm payment if transaction signature provided
+        if (txSignature) {
+          const result = await room.confirmPayment(socket.id, txSignature);
+          if (result.success) {
+            console.log(`✅ Player payment confirmed for room ${roomId}`);
+          } else {
+            console.log(`❌ Player payment failed: ${result.error}`);
+            socket.emit("paymentError", result.error);
+            return;
+          }
+        }
+
+        socket.emit("wordGridRoomJoined", {
+          success: true,
+          roomId: roomId,
+          gameState: room.getGameState(),
+        });
+
+        // Broadcast updated game state to all players in room
+        io.to(roomId).emit("wordGridState", room.getGameState());
+
+        console.log(`✅ Player joined Word Grid room ${roomId}`);
+      } catch (error) {
+        console.error("❌ Word Grid room join error:", error);
+        socket.emit("error", { message: error.message });
+      }
+    });
+
+    socket.on("confirmWordGridPayment", async (data) => {
+      try {
+        const playerInfo = realWalletPlayerSockets.get(socket.id);
+        if (!playerInfo || playerInfo.roomType !== "realWordGrid") return;
+
+        const { txSignature } = data;
+        console.log(`💰 Word Grid payment confirmation:`, {
+          txSignature,
+          roomId: playerInfo.currentRoom,
+        });
+
+        const room = realWalletWordGridRooms.get(playerInfo.currentRoom);
+        if (room) {
+          const result = await room.confirmPayment(socket.id, txSignature);
+          if (result.success) {
+            io.to(room.roomId).emit("wordGridState", room.getGameState());
+            console.log(
+              `✅ Word Grid payment confirmed for room ${room.roomId}`
+            );
+          } else {
+            socket.emit("paymentError", result.error);
+            console.log(`❌ Word Grid payment failed: ${result.error}`);
+          }
+        }
+      } catch (error) {
+        console.error("❌ Word Grid payment confirmation error:", error);
+        socket.emit("paymentError", error.message);
+      }
+    });
+
+    socket.on("placeWordGridLetter", (data) => {
+      try {
+        const playerInfo = realWalletPlayerSockets.get(socket.id);
+        if (!playerInfo || playerInfo.roomType !== "realWordGrid") return;
+
+        const { cellIndex, letter } = data;
+        console.log(`📝 Word Grid letter placement:`, {
+          cellIndex,
+          letter,
+          player: playerInfo.wallet.slice(0, 8) + "...",
+        });
+
+        const room = realWalletWordGridRooms.get(playerInfo.currentRoom);
+        if (room) {
+          const result = room.placeLetter(socket.id, cellIndex, letter);
+          if (result) {
+            // Broadcast letter placement to all players
+            io.to(room.roomId).emit("wordGridLetterPlaced", {
+              cellIndex: cellIndex,
+              letter: letter,
+              playerId: socket.id,
+              result: result,
+            });
+
+            // Broadcast updated game state
+            io.to(room.roomId).emit("wordGridState", room.getGameState());
+
+            console.log(`✅ Letter '${letter}' placed at cell ${cellIndex}`);
+          }
+        }
+      } catch (error) {
+        console.error("❌ Word Grid letter placement error:", error);
+        socket.emit("error", { message: error.message });
+      }
+    });
+
+    socket.on("wordGridTimeOut", (data) => {
+      try {
+        const playerInfo = realWalletPlayerSockets.get(socket.id);
+        if (!playerInfo || playerInfo.roomType !== "realWordGrid") return;
+
+        const { roomId } = data;
+        console.log(`⏰ Word Grid timeout for room:`, roomId);
+
+        const room = realWalletWordGridRooms.get(roomId);
+        if (room) {
+          // Force turn switch on timeout
+          room.switchTurn();
+          io.to(room.roomId).emit("wordGridState", room.getGameState());
+          console.log(`🔄 Turn switched due to timeout in room ${roomId}`);
+        }
+      } catch (error) {
+        console.error("❌ Word Grid timeout error:", error);
+      }
+    });
+
     // Cleanup on disconnect
     socket.on("disconnect", () => {
       console.log(`🔗 Real wallet client disconnected: ${socket.id}`);
 
       const playerInfo = realWalletPlayerSockets.get(socket.id);
       if (playerInfo) {
+        // Clean up word grid room if needed
+        if (playerInfo.roomType === "realWordGrid") {
+          const room = realWalletWordGridRooms.get(playerInfo.currentRoom);
+          if (room) {
+            console.log(
+              `🔤 Cleaning up Word Grid room ${playerInfo.currentRoom} due to disconnect`
+            );
+            room.cleanup();
+            realWalletWordGridRooms.delete(playerInfo.currentRoom);
+          }
+        }
+
         realWalletPlayerSockets.delete(socket.id);
       }
     });

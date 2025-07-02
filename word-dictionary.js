@@ -1,9 +1,40 @@
 // Word Dictionary for Word Grid Game
 // Contains common English words for validation
 
-// Common English words (subset for demo - in production use full dictionary)
-const VALID_WORDS = new Set([
-  // 3 letter words
+import englishWords from "word-list-json";
+
+// Comprehensive English word list
+const validWords = new Set(englishWords.map((word) => word.toUpperCase()));
+
+// Add common 2-letter words that might be missing
+const twoLetterWords = [
+  "AM",
+  "AN",
+  "AS",
+  "AT",
+  "BE",
+  "BY",
+  "DO",
+  "GO",
+  "HE",
+  "IF",
+  "IN",
+  "IS",
+  "IT",
+  "ME",
+  "MY",
+  "NO",
+  "OF",
+  "ON",
+  "OR",
+  "SO",
+  "TO",
+  "UP",
+  "US",
+  "WE",
+];
+
+const threeLetterWords = [
   "THE",
   "AND",
   "FOR",
@@ -17,14 +48,12 @@ const VALID_WORDS = new Set([
   "WAS",
   "ONE",
   "OUR",
-  "OUT",
-  "DAY",
-  "GET",
+  "HAD",
   "HAS",
-  "HIM",
   "HIS",
   "HOW",
   "ITS",
+  "MAY",
   "NEW",
   "NOW",
   "OLD",
@@ -33,357 +62,40 @@ const VALID_WORDS = new Set([
   "WHO",
   "BOY",
   "DID",
-  "END",
-  "FEW",
-  "GOT",
+  "GET",
   "LET",
   "MAN",
-  "OWN",
-  "PUT",
   "SAY",
   "SHE",
   "TOO",
-  "USE",
-
-  // 4 letter words
-  "THAT",
-  "WITH",
-  "HAVE",
-  "THIS",
-  "WILL",
-  "YOUR",
-  "FROM",
-  "THEY",
-  "KNOW",
-  "WANT",
-  "BEEN",
-  "GOOD",
-  "MUCH",
-  "SOME",
-  "TIME",
-  "VERY",
-  "WHEN",
-  "COME",
-  "HERE",
-  "JUST",
-  "LIKE",
-  "LONG",
-  "MAKE",
-  "MANY",
-  "OVER",
-  "SUCH",
-  "TAKE",
-  "THAN",
-  "THEM",
-  "WELL",
-  "WERE",
-  "WHAT",
-  "YEAR",
-  "WORK",
-  "BACK",
-  "CALL",
-  "CAME",
-  "EACH",
-  "EVEN",
-  "FIND",
-  "GIVE",
-  "HAND",
-  "HIGH",
-  "KEEP",
-  "LAST",
-  "LEFT",
-  "LIFE",
-  "LIVE",
-  "LOOK",
-  "MADE",
-  "MOST",
-  "MOVE",
-  "MUST",
-  "NAME",
-  "NEED",
-  "NEXT",
-  "OPEN",
-  "PART",
-  "PLAY",
-  "SAID",
-  "SAME",
-  "SEEM",
-  "SHOW",
-  "SIDE",
-  "TELL",
-  "TURN",
-  "USED",
-  "WANT",
-  "WAYS",
-  "WEEK",
-  "WENT",
-  "WORD",
-  "WORK",
-  "YEAR",
-
-  // 5 letter words
-  "ABOUT",
-  "AFTER",
-  "AGAIN",
-  "BEING",
-  "COULD",
-  "FIRST",
-  "FOUND",
-  "GREAT",
-  "GROUP",
-  "HOUSE",
-  "LARGE",
-  "LIGHT",
-  "MIGHT",
-  "NEVER",
-  "OTHER",
-  "PLACE",
-  "RIGHT",
-  "SHALL",
-  "SMALL",
-  "SOUND",
-  "STILL",
-  "THINK",
-  "THREE",
-  "UNDER",
-  "WATER",
-  "WHERE",
-  "WHICH",
-  "WHILE",
-  "WORLD",
-  "WOULD",
-  "WRITE",
-  "YOUNG",
-  "ABOVE",
-  "AMONG",
-  "BEGAN",
-  "BLACK",
-  "CARRY",
-  "CLOSE",
-  "EVERY",
-  "HEARD",
-  "LATER",
-  "LEARN",
-  "LEAVE",
-  "MUSIC",
-  "OFTEN",
-  "ORDER",
-  "POINT",
-  "ROUND",
-  "SOUND",
-  "STAND",
-  "START",
-  "STATE",
-  "STUDY",
-  "TABLE",
-  "UNTIL",
-  "VOICE",
-  "WHITE",
-  "WHOLE",
-
-  // 6 letter words
-  "BEFORE",
-  "CHANGE",
-  "COURSE",
-  "DURING",
-  "FAMILY",
-  "FOLLOW",
-  "FRIEND",
-  "GROUND",
-  "HAPPEN",
-  "HAVING",
-  "LETTER",
-  "LIVING",
-  "MAKING",
-  "MOTHER",
-  "MOVING",
-  "MYSELF",
-  "NEVER",
-  "NUMBER",
-  "ORANGE",
-  "PERSON",
-  "PLEASE",
-  "PRETTY",
-  "PUBLIC",
-  "RATHER",
-  "SCHOOL",
-  "SECOND",
-  "SHOULD",
-  "SIMPLE",
-  "SISTER",
-  "STREET",
-  "STRONG",
-  "THINGS",
-  "THOUGH",
-  "TRYING",
-  "TURNED",
-  "UNITED",
-  "WANTED",
-  "WINDOW",
-  "WINTER",
-  "WITHIN",
-  "WONDER",
-  "WORKED",
-  "YELLOW",
-
-  // 7 letter words
-  "AGAINST",
-  "ALREADY",
-  "ANOTHER",
-  "BECAUSE",
-  "BETWEEN",
-  "BROUGHT",
-  "CERTAIN",
-  "COMPANY",
-  "COUNTRY",
-  "EDUCATION",
-  "EVENING",
-  "EXAMPLE",
-  "GENERAL",
-  "GETTING",
-  "GREATER",
-  "GROWING",
-  "HIMSELF",
-  "HUSBAND",
-  "INSTEAD",
-  "KITCHEN",
-  "LOOKING",
-  "MACHINE",
-  "MORNING",
-  "NOTHING",
-  "PARENTS",
-  "PERHAPS",
-  "PICTURE",
-  "PROBLEM",
-  "PROGRAM",
-  "PROTECT",
-  "RECEIVE",
-  "RUNNING",
-  "SCIENCE",
-  "SEVERAL",
-  "SOMEONE",
-  "SPECIAL",
-  "STATION",
-  "STUDENT",
-  "SURFACE",
-  "SYSTEMS",
-  "TEACHER",
-  "THROUGH",
-  "TONIGHT",
-  "TROUBLE",
-  "USUALLY",
-  "VERSION",
-  "WALKING",
-  "WEATHER",
-  "WELCOME",
-  "WESTERN",
-  "WITHOUT",
-  "WORKING",
-  "WRITING",
-
-  // 8 letter words
-  "ALTHOUGH",
-  "BUSINESS",
-  "CHILDREN",
-  "COMPUTER",
-  "CONTINUE",
-  "DECISION",
-  "EVERYONE",
-  "FUNCTION",
-  "HOWEVER",
-  "INCREASE",
-  "LANGUAGE",
-  "LEARNING",
-  "MATERIAL",
-  "NATIONAL",
-  "OFFICIAL",
-  "PERSONAL",
-  "PHYSICAL",
-  "POSITION",
-  "POSSIBLE",
-  "REMEMBER",
-  "RESEARCH",
-  "RESPONSE",
-  "SECURITY",
-  "SERVICES",
-  "SHOULDER",
-  "SOLDIERS",
-  "SPEAKING",
-  "STANDING",
-  "STANDARD",
-  "STARTING",
-  "STUDENTS",
-  "TEACHING",
-  "TOGETHER",
-  "TRAINING",
-  "TRAVELED",
-  "WATCHING",
-
-  // Common short words for gameplay
+  "WAY",
   "CAT",
   "DOG",
-  "SUN",
-  "SKY",
-  "EAR",
-  "EYE",
-  "ARM",
-  "LEG",
-  "RUN",
-  "WIN",
-  "YES",
-  "RED",
-  "BIG",
   "BAD",
-  "HOT",
-  "TOP",
-  "CUP",
-  "BAG",
-  "MAP",
-  "PEN",
-  "BED",
-  "CAR",
-  "ART",
+  "BIG",
   "EAT",
+  "FAR",
   "FUN",
+  "GOT",
+  "HOT",
   "JOB",
-  "KEY",
   "LAW",
   "LOT",
-  "MAY",
-  "MOM",
-  "NET",
-  "OIL",
-  "PAY",
-  "POP",
+  "OWN",
   "RUN",
   "SIT",
-  "SIX",
-  "TAX",
+  "TOP",
   "TRY",
-  "WAR",
-  "WAY",
   "WIN",
+  "YES",
   "YET",
-  "ZOO",
+];
 
-  // Game words
-  "GAME",
-  "PLAY",
-  "WORD",
-  "GRID",
-  "TIMER",
-  "SCORE",
-  "POINT",
-  "CHESS",
-  "BOARD",
-  "MATCH",
-  "RULES",
-  "TURNS",
-  "MOVES",
-  "COINS",
-  "PRIZE",
-  "MONEY",
-]);
+// Add these common words to our set
+twoLetterWords.forEach((word) => validWords.add(word));
+threeLetterWords.forEach((word) => validWords.add(word));
+
+console.log(`📚 Loaded ${validWords.size} valid English words for Word Grid`);
 
 // Common suffixes to detect trivial extensions
 const TRIVIAL_SUFFIXES = [
@@ -407,12 +119,9 @@ const TRIVIAL_SUFFIXES = [
 
 // Function to check if a word is valid
 export function isValidWord(word) {
-  if (!word || typeof word !== "string") return false;
-
-  const cleanWord = word.toUpperCase().trim();
-  if (cleanWord.length < 3) return false; // Minimum 3 letters
-
-  return VALID_WORDS.has(cleanWord);
+  if (!word || word.length < 2) return false;
+  const upperWord = word.toUpperCase().trim();
+  return validWords.has(upperWord);
 }
 
 // Function to check if a word is a trivial extension of an existing word
@@ -443,136 +152,195 @@ export function isTrivialExtension(newWord, existingWords) {
   return false;
 }
 
-// Function to find all words in a grid
-export function findWordsInGrid(grid, gridSize = 8) {
-  const words = [];
-
-  // Helper function to extract word from coordinates
-  const extractWord = (coordinates) => {
-    return coordinates
-      .map((coord) => grid[coord])
-      .filter((cell) => cell && cell.letter)
-      .map((cell) => cell.letter)
-      .join("");
-  };
-
-  // Check horizontal words (rows)
-  for (let row = 0; row < gridSize; row++) {
-    for (let startCol = 0; startCol < gridSize; startCol++) {
-      for (let endCol = startCol + 2; endCol < gridSize; endCol++) {
-        // Minimum 3 letters
-        const coordinates = [];
-        for (let col = startCol; col <= endCol; col++) {
-          coordinates.push(row * gridSize + col);
-        }
-
-        const word = extractWord(coordinates);
-        if (word.length >= 3 && isValidWord(word)) {
-          words.push({
-            word: word,
-            coordinates: coordinates,
-            direction: "horizontal",
-          });
-        }
-      }
-    }
-  }
-
-  // Check vertical words (columns)
-  for (let col = 0; col < gridSize; col++) {
-    for (let startRow = 0; startRow < gridSize; startRow++) {
-      for (let endRow = startRow + 2; endRow < gridSize; endRow++) {
-        // Minimum 3 letters
-        const coordinates = [];
-        for (let row = startRow; row <= endRow; row++) {
-          coordinates.push(row * gridSize + col);
-        }
-
-        const word = extractWord(coordinates);
-        if (word.length >= 3 && isValidWord(word)) {
-          words.push({
-            word: word,
-            coordinates: coordinates,
-            direction: "vertical",
-          });
-        }
-      }
-    }
-  }
-
-  // Check diagonal words (top-left to bottom-right)
-  for (let startRow = 0; startRow < gridSize; startRow++) {
-    for (let startCol = 0; startCol < gridSize; startCol++) {
-      for (
-        let len = 3;
-        len <= Math.min(gridSize - startRow, gridSize - startCol);
-        len++
-      ) {
-        const coordinates = [];
-        for (let i = 0; i < len; i++) {
-          coordinates.push((startRow + i) * gridSize + (startCol + i));
-        }
-
-        const word = extractWord(coordinates);
-        if (word.length >= 3 && isValidWord(word)) {
-          words.push({
-            word: word,
-            coordinates: coordinates,
-            direction: "diagonal-down",
-          });
-        }
-      }
-    }
-  }
-
-  // Check diagonal words (top-right to bottom-left)
-  for (let startRow = 0; startRow < gridSize; startRow++) {
-    for (let startCol = gridSize - 1; startCol >= 0; startCol--) {
-      for (
-        let len = 3;
-        len <= Math.min(gridSize - startRow, startCol + 1);
-        len++
-      ) {
-        const coordinates = [];
-        for (let i = 0; i < len; i++) {
-          coordinates.push((startRow + i) * gridSize + (startCol - i));
-        }
-
-        const word = extractWord(coordinates);
-        if (word.length >= 3 && isValidWord(word)) {
-          words.push({
-            word: word,
-            coordinates: coordinates,
-            direction: "diagonal-up",
-          });
-        }
-      }
-    }
-  }
-
-  return words;
+// Get all 8 directions from a cell
+function getDirections() {
+  return [
+    { dx: 0, dy: 1 }, // right
+    { dx: 1, dy: 0 }, // down
+    { dx: 1, dy: 1 }, // diagonal down-right
+    { dx: 1, dy: -1 }, // diagonal down-left
+    { dx: 0, dy: -1 }, // left
+    { dx: -1, dy: 0 }, // up
+    { dx: -1, dy: -1 }, // diagonal up-left
+    { dx: -1, dy: 1 }, // diagonal up-right
+  ];
 }
 
-// Function to detect new words formed after placing a letter
-export function detectNewWords(grid, newLetterIndex, existingWords = []) {
-  const allWords = findWordsInGrid(grid);
-  const existingWordStrings = existingWords.map((w) => w.word);
+// Convert cell index to row, col
+function indexToCoords(index) {
+  return { row: Math.floor(index / 8), col: index % 8 };
+}
 
-  // Filter to only new words that include the newly placed letter
-  const newWords = allWords.filter((wordObj) => {
-    const includesNewLetter = wordObj.coordinates.includes(newLetterIndex);
-    const isNew = !existingWordStrings.includes(wordObj.word);
-    const notTrivial = !isTrivialExtension(wordObj.word, existingWordStrings);
+// Convert row, col to cell index
+function coordsToIndex(row, col) {
+  return row * 8 + col;
+}
 
-    return includesNewLetter && isNew && notTrivial;
-  });
+// Check if coordinates are valid
+function isValidCoord(row, col) {
+  return row >= 0 && row < 8 && col >= 0 && col < 8;
+}
 
+// Get word in a specific direction from starting position
+function getWordInDirection(
+  grid,
+  startRow,
+  startCol,
+  direction,
+  minLength = 2,
+  maxLength = 8
+) {
+  let word = "";
+  let coordinates = [];
+  let row = startRow;
+  let col = startCol;
+
+  for (let i = 0; i < maxLength && isValidCoord(row, col); i++) {
+    const cellIndex = coordsToIndex(row, col);
+    const cell = grid[cellIndex];
+
+    if (!cell || !cell.letter) break;
+
+    word += cell.letter;
+    coordinates.push(cellIndex);
+
+    // Check if we have a valid word of minimum length
+    if (word.length >= minLength && isValidWord(word)) {
+      // Return the valid word found
+      return {
+        word: word,
+        coordinates: coordinates.slice(),
+        length: word.length,
+        startIndex: coordsToIndex(startRow, startCol),
+        direction: direction,
+      };
+    }
+
+    row += direction.dx;
+    col += direction.dy;
+  }
+
+  return null;
+}
+
+// Find all words in the grid
+export function findWordsInGrid(grid) {
+  const foundWords = [];
+  const wordSet = new Set(); // Prevent duplicates
+
+  // Check all starting positions
+  for (let row = 0; row < 8; row++) {
+    for (let col = 0; col < 8; col++) {
+      const cellIndex = coordsToIndex(row, col);
+      const cell = grid[cellIndex];
+
+      if (!cell || !cell.letter) continue;
+
+      // Check all directions from this position
+      const directions = getDirections();
+      for (const direction of directions) {
+        const wordResult = getWordInDirection(grid, row, col, direction);
+
+        if (wordResult) {
+          const wordKey = `${wordResult.word}_${wordResult.coordinates.join(
+            "-"
+          )}`;
+          if (!wordSet.has(wordKey)) {
+            wordSet.add(wordKey);
+            foundWords.push(wordResult);
+          }
+        }
+      }
+    }
+  }
+
+  return foundWords;
+}
+
+// Detect new words formed after placing a letter
+export function detectNewWords(grid, lastPlacedIndex, previousWords = []) {
+  // Get all current words
+  const currentWords = findWordsInGrid(grid);
+
+  // Find words that weren't there before
+  const newWords = [];
+  const previousWordKeys = new Set(
+    previousWords.map((w) => `${w.word}_${w.coordinates.join("-")}`)
+  );
+
+  for (const wordResult of currentWords) {
+    const wordKey = `${wordResult.word}_${wordResult.coordinates.join("-")}`;
+
+    // Check if this is a new word and if it includes the newly placed letter
+    if (
+      !previousWordKeys.has(wordKey) &&
+      wordResult.coordinates.includes(lastPlacedIndex)
+    ) {
+      newWords.push({
+        word: wordResult.word,
+        coordinates: wordResult.coordinates,
+        length: wordResult.length,
+        startIndex: wordResult.startIndex,
+        direction: wordResult.direction,
+        points: wordResult.length, // Points equal to word length
+        isNew: true,
+      });
+    }
+  }
+
+  console.log(
+    `🔍 Detected ${newWords.length} new words:`,
+    newWords.map((w) => w.word)
+  );
   return newWords;
 }
+
+// Get word suggestions for debugging/hints
+export function getWordSuggestions(grid, emptyIndices, maxSuggestions = 5) {
+  const suggestions = [];
+
+  for (const emptyIndex of emptyIndices.slice(0, 10)) {
+    // Check first 10 empty spots
+    const { row, col } = indexToCoords(emptyIndex);
+
+    // Try each letter
+    for (let charCode = 65; charCode <= 90; charCode++) {
+      // A-Z
+      const letter = String.fromCharCode(charCode);
+
+      // Simulate placing this letter
+      const testGrid = [...grid];
+      testGrid[emptyIndex] = { letter, playerId: "test", isNewWord: false };
+
+      // Check if this creates any new words
+      const newWords = detectNewWords(testGrid, emptyIndex, []);
+
+      if (newWords.length > 0) {
+        suggestions.push({
+          cellIndex: emptyIndex,
+          letter: letter,
+          wordsFormed: newWords.map((w) => w.word),
+          totalPoints: newWords.reduce((sum, w) => sum + w.points, 0),
+        });
+
+        if (suggestions.length >= maxSuggestions) break;
+      }
+    }
+
+    if (suggestions.length >= maxSuggestions) break;
+  }
+
+  return suggestions.sort((a, b) => b.totalPoints - a.totalPoints);
+}
+
+// Export word list size for verification
+export const wordCount = validWords.size;
 
 export default {
   isValidWord,
   isTrivialExtension,
   findWordsInGrid,
   detectNewWords,
+  getWordSuggestions,
+  wordCount,
 };

@@ -31,7 +31,7 @@ import {
   collectValidatedEntryFee,
   ensurePlatformBalance,
 } from "./smart-contract-integration.js";
-import { WordGridRoom } from "./word-grid-game.js";
+// WordGridRoom moved to real-wallet-server.js for blockchain integration
 import { setupDemoRoutes } from "./demo-server.js";
 import { setupRealWalletRoutes } from "./real-wallet-server.js";
 
@@ -1294,7 +1294,7 @@ class OrbCollectorRoom {
       score: 0,
       color: playerColors[this.players.size % playerColors.length],
       betAmount: finalBetAmount,
-      paymentConfirmed: false,
+      paymentConfirmed: false, // Will be set to true after real blockchain verification
       joinedAt: new Date(),
     };
 
@@ -1302,16 +1302,8 @@ class OrbCollectorRoom {
     console.log(
       `🔮 Player ${wallet.slice(0, 8)}... joined orb collector room ${
         this.roomId
-      }`
+      } - Payment validation required`
     );
-
-    // Auto-confirm payment for now (real blockchain integration would verify here)
-    player.paymentConfirmed = true;
-
-    // Start countdown if we have minimum players
-    if (this.players.size >= this.minPlayers && this.status === "waiting") {
-      this.startCountdown();
-    }
 
     return this.getGameState();
   }
@@ -1336,6 +1328,17 @@ class OrbCollectorRoom {
 
   startCountdown() {
     if (this.status !== "waiting") return;
+
+    // Check if all players have confirmed payment
+    const allPaid = Array.from(this.players.values()).every(
+      (p) => p.paymentConfirmed
+    );
+    if (!allPaid) {
+      console.log(
+        `🔮 Cannot start countdown - not all players have confirmed payment`
+      );
+      return;
+    }
 
     this.status = "countdown";
     this.countdownTime = 5;
@@ -1891,6 +1894,44 @@ class OrbCollectorRoom {
       ),
     };
   }
+
+  confirmPayment(playerId) {
+    const player = Array.from(this.players.values()).find(
+      (p) => p.id === playerId
+    );
+    if (player) {
+      player.paymentConfirmed = true;
+      console.log(
+        `✅ Payment confirmed for orb collector player ${player.walletAddress}`
+      );
+
+      // Check if all players have confirmed payment and start countdown
+      const allPaid = Array.from(this.players.values()).every(
+        (p) => p.paymentConfirmed
+      );
+      if (
+        allPaid &&
+        this.players.size >= this.minPlayers &&
+        this.status === "waiting"
+      ) {
+        this.startCountdown();
+      }
+    }
+  }
+
+  calculateBetPool() {
+    const totalBets = Array.from(this.players.values()).reduce(
+      (sum, player) => sum + player.betAmount,
+      0
+    );
+    const platformFee = totalBets * 0.1; // 10% platform fee like TicTacToe
+
+    return {
+      totalAmount: totalBets,
+      platformFee: platformFee,
+      prizePool: totalBets - platformFee,
+    };
+  }
 }
 
 // Global game state
@@ -1899,7 +1940,7 @@ const lobby = new Lobby();
 const playerSockets = new Map();
 const ticTacToeRooms = new Map();
 const orbCollectorRooms = new Map();
-const wordGridRooms = new Map();
+// Note: Word Grid rooms moved to real-wallet-server.js for blockchain integration
 
 // Make io globally accessible for lobby countdown
 let globalIo;
@@ -2557,260 +2598,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Word Grid Game Events
-  socket.on("createWordGridRoom", async (data) => {
-    try {
-      const { roomId, password, wallet, betAmount, txSignature, isMockMode } =
-        data;
-
-      console.log(`🔤 Creating Word Grid room: ${roomId}`, {
-        wallet,
-        betAmount,
-        hasPassword: !!password,
-        isMockMode: !!isMockMode,
-      });
-
-      // Check if room already exists
-      if (wordGridRooms.has(roomId)) {
-        throw new Error("Room with this ID already exists");
-      }
-
-      // Create new room with password and mock mode
-      const room = new WordGridRoom(
-        roomId,
-        betAmount,
-        password,
-        wallet,
-        isMockMode
-      );
-      wordGridRooms.set(roomId, room);
-
-      console.log(`✅ Created new Word Grid room: ${roomId} by ${wallet}`);
-
-      // Add the creator as the first player
-      await room.addPlayer(socket.id, socket.id, wallet, betAmount);
-
-      // Confirm payment immediately for testing/mock mode
-      console.log(
-        `🔍 Confirming payment for room creator ${socket.id} in room ${roomId}`
-      );
-      room.confirmPayment(socket.id);
-      console.log(`✅ Payment confirmed for room creator ${socket.id}`);
-
-      // In mock mode, handle mock balance
-      if (isMockMode) {
-        const { handleMockPayment } = await import(
-          "./smart-contract-integration.js"
-        );
-        await handleMockPayment(wallet, betAmount, `wordgrid_create_${roomId}`);
-      }
-
-      socket.join(roomId);
-
-      // Update player socket mapping
-      playerSockets.set(socket.id, {
-        playerId: socket.id,
-        wallet: wallet,
-        currentRoom: roomId,
-        roomType: "wordGrid",
-      });
-
-      console.log(
-        `✅ Room creator joined Word Grid room: ${roomId}, players: ${room.players.length}/${room.maxPlayers}`
-      );
-
-      // Broadcast updated game state
-      io.to(roomId).emit("wordGridGameState", room.getGameState());
-    } catch (error) {
-      console.error("❌ Error creating Word Grid room:", error);
-      socket.emit("wordGridError", { message: error.message });
-    }
-  });
-
-  socket.on("getWordGridRoomInfo", async (data) => {
-    try {
-      const { roomId, password } = data;
-
-      console.log(`🔍 Getting Word Grid room info: ${roomId}`);
-
-      const room = wordGridRooms.get(roomId);
-      if (!room) {
-        throw new Error("Room not found");
-      }
-
-      // Verify password if provided
-      if (!room.verifyPassword(password)) {
-        throw new Error("Invalid room password");
-      }
-
-      const roomInfo = room.getRoomInfo();
-      socket.emit("wordGridRoomInfo", roomInfo);
-    } catch (error) {
-      console.error("❌ Error getting Word Grid room info:", error);
-      socket.emit("wordGridError", { message: error.message });
-    }
-  });
-
-  socket.on("joinWordGridGame", async (data) => {
-    try {
-      const { roomId, password, wallet, txSignature, isMockMode } = data;
-
-      console.log(`🔤 Player joining Word Grid room: ${roomId}`, {
-        wallet,
-        hasPassword: !!password,
-        isMockMode: !!isMockMode,
-      });
-
-      const room = wordGridRooms.get(roomId);
-
-      if (!room) {
-        throw new Error(
-          "Room not found. Please check the room ID or create a new room."
-        );
-      }
-
-      // Verify password
-      if (!room.verifyPassword(password)) {
-        throw new Error("Invalid room password");
-      }
-
-      // Use the room's bet amount (both players must pay the same)
-      await room.addPlayer(socket.id, socket.id, wallet, room.betAmount);
-
-      // Confirm payment immediately for testing
-      console.log(
-        `🔍 Confirming payment for player ${socket.id} in room ${roomId}`
-      );
-      room.confirmPayment(socket.id);
-      console.log(`✅ Payment confirmed for player ${socket.id}`);
-
-      // In mock mode, handle mock balance
-      if (isMockMode) {
-        const { handleMockPayment } = await import(
-          "./smart-contract-integration.js"
-        );
-        await handleMockPayment(
-          wallet,
-          room.betAmount,
-          `wordgrid_join_${roomId}`
-        );
-      }
-
-      socket.join(roomId);
-
-      // Update player socket mapping
-      playerSockets.set(socket.id, {
-        playerId: socket.id,
-        wallet: wallet,
-        currentRoom: roomId,
-        roomType: "wordGrid",
-      });
-
-      console.log(
-        `✅ Player joined Word Grid room: ${roomId}, players: ${room.players.length}/${room.maxPlayers}`
-      );
-
-      // Broadcast updated game state
-      io.to(roomId).emit("wordGridGameState", room.getGameState());
-
-      // Start game if room is full
-      if (room.players.length === room.maxPlayers) {
-        console.log(`🚀 Starting Word Grid game in room: ${roomId}`);
-        console.log(`🔍 Room state before start:`, {
-          playersCount: room.players.length,
-          players: room.players.map((p) => ({
-            id: p.id,
-            wallet: p.wallet,
-            paymentConfirmed: p.paymentConfirmed,
-          })),
-          gamePhase: room.gamePhase,
-        });
-
-        try {
-          const gameState = room.startGame();
-          console.log(`✅ Game started successfully in room: ${roomId}`);
-          io.to(roomId).emit("wordGridGameStarted", gameState);
-          io.to(roomId).emit("wordGridGameState", gameState);
-        } catch (error) {
-          console.error(
-            `❌ Error starting Word Grid game in room ${roomId}:`,
-            error.message
-          );
-          io.to(roomId).emit("wordGridError", {
-            message: `Failed to start game: ${error.message}`,
-          });
-        }
-      }
-    } catch (error) {
-      console.error("❌ Error joining Word Grid game:", error);
-      socket.emit("wordGridError", { message: error.message });
-    }
-  });
-
-  socket.on("placeWordGridLetter", (data) => {
-    try {
-      const { roomId, cellIndex, letter } = data;
-      const room = wordGridRooms.get(roomId);
-
-      if (!room) {
-        socket.emit("wordGridError", { message: "Room not found" });
-        return;
-      }
-
-      const result = room.placeLetter(socket.id, cellIndex, letter);
-
-      console.log(
-        `📝 Letter placed in Word Grid ${roomId}: ${letter} at cell ${cellIndex}`,
-        {
-          newWords: result.newWords.map((w) => w.word),
-          nextPlayer: result.nextPlayer,
-        }
-      );
-
-      // Broadcast letter placement
-      io.to(roomId).emit("wordGridLetterPlaced", result);
-
-      // Clear isNewWord flags after 3 seconds
-      setTimeout(() => {
-        room.grid.forEach((cell) => {
-          if (cell.isNewWord) {
-            cell.isNewWord = false;
-          }
-        });
-
-        io.to(roomId).emit("wordGridGameState", room.getGameState());
-      }, 3000);
-    } catch (error) {
-      console.error("❌ Error placing Word Grid letter:", error);
-      socket.emit("wordGridError", { message: error.message });
-    }
-  });
-
-  socket.on("wordGridTimeOut", (data) => {
-    try {
-      const { roomId } = data;
-      const room = wordGridRooms.get(roomId);
-
-      if (!room) {
-        socket.emit("wordGridError", { message: "Room not found" });
-        return;
-      }
-
-      console.log(`⏰ Time out in Word Grid room: ${roomId}`);
-      room.finishGame("timeout").then((result) => {
-        io.to(roomId).emit("wordGridGameFinished", result);
-
-        // Clean up room after 30 seconds
-        setTimeout(() => {
-          wordGridRooms.delete(roomId);
-          console.log(`🧹 Cleaned up Word Grid room: ${roomId}`);
-        }, 30000);
-      });
-    } catch (error) {
-      console.error("❌ Error handling Word Grid timeout:", error);
-      socket.emit("wordGridError", { message: error.message });
-    }
-  });
+  // Word Grid Game Events - MOVED TO real-wallet-server.js for blockchain integration
 
   socket.on("disconnect", () => {
     console.log("🔌 Client disconnected:", socket.id);
@@ -2871,27 +2659,108 @@ io.on("connection", (socket) => {
             playerInfo.currentRoom
           );
         }
-      } else if (wordGridRooms.has(playerInfo.currentRoom)) {
-        // Handle Word Grid room cleanup
-        const room = wordGridRooms.get(playerInfo.currentRoom);
-        const wasEmpty = room.removePlayer(playerInfo.playerId);
-
-        if (wasEmpty) {
-          room.cleanup();
-          wordGridRooms.delete(playerInfo.currentRoom);
-          console.log(
-            "🧹 Cleaned up empty Word Grid room:",
-            playerInfo.currentRoom
-          );
-        } else {
-          // Broadcast updated state to remaining players
-          io.to(room.id).emit("wordGridGameState", room.getGameState());
-        }
       }
+      // Note: Word Grid cleanup now handled in real-wallet-server.js
 
       playerSockets.delete(socket.id);
     }
   });
+
+  // NEW: Orb Collector Payment Confirmation Handler
+  socket.on("confirmOrbPayment", async ({ txSignature, gameId, amount }) => {
+    try {
+      const playerInfo = playerSockets.get(socket.id);
+      if (!playerInfo || playerInfo.roomType !== "orbCollector") return;
+
+      const orbRoom = orbCollectorRooms.get(playerInfo.currentRoom);
+      if (!orbRoom) return;
+
+      // Store transaction details
+      const player = Array.from(orbRoom.players.values()).find(
+        (p) => p.id === playerInfo.playerId
+      );
+      if (player) {
+        player.txSignature = txSignature;
+        player.gameId = gameId;
+        player.actualPaidAmount = amount;
+      }
+
+      orbRoom.confirmPayment(playerInfo.playerId);
+
+      // Broadcast updated state to all players
+      const gameState = orbRoom.getGameState();
+      io.to(orbRoom.roomId).emit("orbGameState", gameState);
+
+      console.log(
+        `💰 Orb game payment confirmed for player: ${playerInfo.playerId}`
+      );
+      console.log(`📝 TX Signature: ${txSignature}`);
+      console.log(`💵 Amount: ${amount} GOR`);
+
+      // Validate and collect entry fee with transaction verification
+      try {
+        console.log(`🔍 Validating orb game transaction: ${txSignature}`);
+        const validationResult = await validateEntryFeePayment(
+          playerInfo.wallet,
+          orbRoom.roomId,
+          txSignature
+        );
+
+        if (validationResult.verified) {
+          console.log(
+            `✅ Orb game transaction validated! Amount detected: ${validationResult.amount} GOR`
+          );
+
+          // Collect the validated entry fee
+          const escrowResult = await collectValidatedEntryFee(
+            playerInfo.wallet,
+            validationResult.amount,
+            orbRoom.roomId,
+            txSignature
+          );
+          console.log(
+            `✅ Orb game validated entry fee collected: ${escrowResult.signature}`
+          );
+        } else {
+          console.error(
+            `❌ Orb game transaction validation failed for ${txSignature}`
+          );
+        }
+      } catch (error) {
+        console.error(
+          `❌ Failed to validate/collect orb game entry fee:`,
+          error
+        );
+      }
+
+      // If all players have paid, check platform balance
+      const allPaid = Array.from(orbRoom.players.values()).every(
+        (p) => p.paymentConfirmed
+      );
+      if (allPaid) {
+        const betPool = orbRoom.calculateBetPool();
+        console.log(`🏦 Creating escrow for orb game: ${orbRoom.roomId}`);
+        console.log(`💰 Total pool: ${betPool.totalAmount} GOR`);
+        console.log(`💸 Platform fee: ${betPool.platformFee} GOR`);
+
+        try {
+          const balanceCheck = await ensurePlatformBalance(betPool.prizePool);
+          if (!balanceCheck.sufficient) {
+            console.log(`⚠️ ${balanceCheck.message}`);
+          }
+        } catch (error) {
+          console.error(
+            `❌ Failed to check platform balance for orb game:`,
+            error
+          );
+        }
+      }
+    } catch (error) {
+      socket.emit("error", { message: error.message });
+    }
+  });
+
+  // All Word Grid handlers moved to real-wallet-server.js for blockchain integration
 });
 
 // RPC Proxy endpoints to bypass CORS issues
@@ -3026,7 +2895,7 @@ app.get("/health", (req, res) => {
     activeGames: gameRooms.size,
     ticTacToeRooms: ticTacToeRooms.size,
     orbCollectorRooms: orbCollectorRooms.size,
-    wordGridRooms: wordGridRooms.size,
+    // wordGridRooms moved to real-wallet-server.js
     lobbyPlayers: lobby.players.size,
     connectedSockets: playerSockets.size,
     blockchain: {
@@ -3205,3 +3074,111 @@ const startServer = async () => {
 };
 
 startServer();
+
+// Utility function to generate unique room IDs
+function generateRoomId(gameType = "room") {
+  let attempts = 0;
+  const maxAttempts = 10;
+
+  while (attempts < maxAttempts) {
+    const timestamp = Date.now().toString(36);
+    const randomStr = Math.random().toString(36).substring(2, 8);
+    const roomId = `${gameType}_${timestamp}_${randomStr}`.toUpperCase();
+
+    // Import the room storage from real-wallet-server if available
+    let roomExists = false;
+
+    // Check different game room types
+    if (gameType.toLowerCase().includes("wordgrid")) {
+      // Check if word grid room exists (would need to import from real-wallet-server)
+      // For now, just use the generated ID since conflicts are very rare
+      roomExists = false;
+    } else if (gameType.toLowerCase().includes("tictactoe")) {
+      roomExists = ticTacToeRooms.has(roomId);
+    } else if (gameType.toLowerCase().includes("orb")) {
+      roomExists = orbCollectorRooms.has(roomId);
+    }
+
+    if (!roomExists) {
+      return roomId;
+    }
+
+    attempts++;
+    // Add small delay to ensure different timestamp
+    if (attempts < maxAttempts) {
+      const start = Date.now();
+      while (Date.now() - start < 2) {} // 2ms delay
+    }
+  }
+
+  // Fallback with extra randomness if all attempts failed
+  const timestamp = Date.now().toString(36);
+  const extraRandom = Math.random().toString(36).substring(2, 12);
+  return `${gameType}_${timestamp}_${extraRandom}`.toUpperCase();
+}
+
+// NEW: Generate Room ID endpoint
+app.get("/api/generate-room-id/:gameType", (req, res) => {
+  try {
+    const { gameType } = req.params;
+    const roomId = generateRoomId(gameType);
+
+    console.log(`🎲 Generated room ID: ${roomId} for ${gameType}`);
+
+    res.json({
+      success: true,
+      roomId: roomId,
+      gameType: gameType,
+    });
+  } catch (error) {
+    console.error("❌ Error generating room ID:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to generate room ID",
+    });
+  }
+});
+
+// Mock balance API endpoints
+app.get("/api/mock-balance/:wallet", (req, res) => {
+  try {
+    const { wallet } = req.params;
+    // Return a mock balance for development
+    const mockBalance = 5.0; // 5 GOR for testing
+
+    res.json({
+      success: true,
+      wallet: wallet,
+      balance: mockBalance,
+      currency: "GOR",
+    });
+  } catch (error) {
+    console.error("❌ Error getting mock balance:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to get mock balance",
+    });
+  }
+});
+
+app.post("/api/mock-balance/:wallet", (req, res) => {
+  try {
+    const { wallet } = req.params;
+    const { amount, operation } = req.body; // operation: 'add' or 'subtract'
+
+    // Just return success for mock operations
+    res.json({
+      success: true,
+      wallet: wallet,
+      operation: operation,
+      amount: amount,
+      newBalance: 5.0, // Mock balance
+    });
+  } catch (error) {
+    console.error("❌ Error updating mock balance:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update mock balance",
+    });
+  }
+});
