@@ -62,6 +62,9 @@ if (PLATFORM_PRIVATE_KEY) {
 // Storage for word grid rooms (other room types declared elsewhere)
 const realWalletWordGridRooms = new Map();
 
+// Storage for Pokemon card rooms
+const realWalletPokemonRooms = new Map();
+
 // Real wallet game classes with blockchain integration
 class RealWalletWordGridRoom {
   constructor(
@@ -1617,6 +1620,755 @@ const realWalletTicTacToeRooms = new Map();
 const realWalletOrbCollectorRooms = new Map();
 const realWalletPlayerSockets = new Map();
 
+// Real Pokemon Card Room Class
+class RealWalletPokemonRoom {
+  constructor(
+    roomId,
+    betAmount = 1,
+    playerCount = 2,
+    password = null,
+    io = null
+  ) {
+    this.roomId = roomId;
+    this.betAmount = betAmount;
+    this.playerCount = playerCount; // 2-6 players
+    this.password = password;
+    this.io = io;
+    this.maxPlayers = playerCount;
+    this.players = [];
+    this.gamePhase = "waiting"; // waiting, countdown, playing, finished
+    this.countdownTimer = null;
+    this.gameTimer = null;
+    this.totalEscrowed = 0;
+    this.gameStartTime = null;
+    this.gameDuration = 15 * 60 * 1000; // 15 minutes in milliseconds
+
+    // Pokemon-specific game state
+    this.pokemonCards = [];
+    this.gameState = {
+      currentTurn: null,
+      roundNumber: 1,
+      maxRounds: 5,
+    };
+
+    console.log(
+      `🎴 Created Real Pokemon room: ${roomId} with bet ${betAmount} GOR for ${playerCount} players`
+    );
+  }
+
+  verifyPassword(inputPassword) {
+    if (!this.password) return true;
+    return this.password === inputPassword;
+  }
+
+  async addPlayer(playerId, socketId, wallet, betAmount = null) {
+    if (this.players.length >= this.maxPlayers) {
+      throw new Error("Room is full");
+    }
+
+    if (this.gamePhase !== "waiting") {
+      throw new Error("Game already in progress");
+    }
+
+    if (!wallet || typeof wallet !== "string" || wallet.trim() === "") {
+      throw new Error("Valid wallet address is required");
+    }
+
+    const existingPlayer = this.players.find((p) => p.wallet === wallet);
+    if (existingPlayer) {
+      throw new Error("Player already in room");
+    }
+
+    const finalBetAmount = betAmount || this.betAmount;
+    const nickname = wallet.length >= 8 ? `${wallet.slice(0, 8)}...` : wallet;
+
+    const player = {
+      id: playerId,
+      socketId: socketId,
+      wallet: wallet,
+      nickname: nickname,
+      betAmount: finalBetAmount,
+      ready: false,
+      paymentConfirmed: false,
+      escrowTxSignature: null,
+      pokemonCards: [],
+      score: 0,
+      hp: 100,
+    };
+
+    this.players.push(player);
+
+    console.log(
+      `🎴 Player ${wallet.slice(0, 8)}... joined Pokemon room ${this.roomId} (${
+        this.players.length
+      }/${this.maxPlayers})`
+    );
+
+    return this.getGameState();
+  }
+
+  async confirmPayment(playerId, txSignature) {
+    console.log(`💰 Pokemon confirmPayment called:`, {
+      playerId,
+      txSignature,
+      roomId: this.roomId,
+    });
+
+    const player = this.players.find((p) => p.id === playerId);
+    if (!player) {
+      console.log(`❌ Player not found: ${playerId}`);
+      throw new Error("Player not found");
+    }
+
+    if (player.paymentConfirmed) {
+      console.log(`⚠️ Player ${player.wallet} payment already confirmed`);
+      return { success: true, gameState: this.getGameState() };
+    }
+
+    try {
+      // Verify the transaction on blockchain
+      const verified = await this.verifyPaymentTransaction(
+        player.wallet,
+        txSignature,
+        player.betAmount
+      );
+
+      if (verified) {
+        player.paymentConfirmed = true;
+        player.escrowTxSignature = txSignature;
+        this.totalEscrowed += player.betAmount;
+
+        console.log(
+          `💰 Pokemon payment confirmed: ${player.betAmount} GOR from ${player.wallet}`
+        );
+        console.log(`   Transaction: ${txSignature}`);
+        console.log(`   Total escrowed: ${this.totalEscrowed} GOR`);
+
+        // Check if all players have paid
+        const allPaid = this.players.every((p) => p.paymentConfirmed);
+        const enoughPlayers = this.players.length >= 2; // Minimum 2 players
+        const roomFull = this.players.length === this.maxPlayers;
+
+        console.log(`🎴 Pokemon payment status check:`, {
+          playersCount: this.players.length,
+          allPaid,
+          enoughPlayers,
+          roomFull,
+          playerPayments: this.players.map((p) => ({
+            wallet: p.wallet.slice(0, 8) + "...",
+            paid: p.paymentConfirmed,
+          })),
+        });
+
+        if (allPaid && (roomFull || enoughPlayers)) {
+          console.log(
+            `🚀 All Pokemon players paid - starting 5-second countdown`
+          );
+          this.startCountdown();
+        } else {
+          console.log(`⏳ Waiting for more payments or players...`);
+        }
+
+        return { success: true, gameState: this.getGameState() };
+      } else {
+        return { success: false, error: "Payment verification failed" };
+      }
+    } catch (error) {
+      console.error("❌ Pokemon payment verification error:", error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async verifyPaymentTransaction(playerWallet, txSignature, expectedAmount) {
+    try {
+      console.log(
+        `🔍 Verifying Pokemon payment: ${txSignature} for ${expectedAmount} GOR`
+      );
+      console.log(`🔍 Player wallet: ${playerWallet}`);
+      console.log(`🔍 Expected amount: ${expectedAmount} GOR`);
+
+      const transaction = await connection.getTransaction(txSignature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+
+      if (!transaction || transaction.meta?.err) {
+        console.log(`❌ Transaction not found or failed: ${txSignature}`);
+        return false;
+      }
+
+      // Verify amount transferred
+      const preBalances = transaction.meta.preBalances;
+      const postBalances = transaction.meta.postBalances;
+      const accountKeys = transaction.transaction.message.accountKeys;
+
+      const playerIndex = accountKeys.findIndex(
+        (key) => key.toBase58() === playerWallet
+      );
+
+      if (playerIndex === -1) {
+        console.log(`❌ Player wallet not found in transaction`);
+        return false;
+      }
+
+      const playerBalanceChange =
+        preBalances[playerIndex] - postBalances[playerIndex];
+      const expectedLamports = expectedAmount * Math.pow(10, GOR_DECIMALS);
+      const tolerance = 0.01 * Math.pow(10, GOR_DECIMALS);
+
+      if (Math.abs(playerBalanceChange - expectedLamports) <= tolerance) {
+        console.log(
+          `✅ Pokemon payment verified: ${
+            playerBalanceChange / Math.pow(10, GOR_DECIMALS)
+          } GOR`
+        );
+        return true;
+      } else {
+        console.log(
+          `❌ Payment amount mismatch: expected ${expectedAmount}, got ${
+            playerBalanceChange / Math.pow(10, GOR_DECIMALS)
+          }`
+        );
+        return false;
+      }
+    } catch (error) {
+      console.error("❌ Pokemon payment verification error:", error);
+      return false;
+    }
+  }
+
+  startCountdown() {
+    if (this.countdownTimer) {
+      clearTimeout(this.countdownTimer);
+    }
+
+    this.gamePhase = "countdown";
+    let countdown = 5; // 5 seconds as requested
+
+    const countdownInterval = setInterval(() => {
+      if (this.io) {
+        this.io.to(this.roomId).emit("pokemonCountdown", {
+          roomId: this.roomId,
+          countdown: countdown,
+          message: `Pokemon battle starting in ${countdown} seconds...`,
+        });
+      }
+
+      countdown--;
+
+      if (countdown < 0) {
+        clearInterval(countdownInterval);
+        this.startGame();
+      }
+    }, 1000);
+
+    this.countdownTimer = countdownInterval;
+  }
+
+  startGame() {
+    this.gamePhase = "playing";
+    this.gameStartTime = Date.now();
+    this.gameState.currentTurn = this.players[0].id; // First player starts
+    this.gameState.turnCount = 1;
+
+    // Initialize Pokemon battle system
+    this.initializePokemonBattle();
+
+    console.log(`🎴 Pokemon battle started in room ${this.roomId}`);
+    console.log(`   Player 1: ${this.players[0].wallet.slice(0, 8)}...`);
+    console.log(`   Player 2: ${this.players[1].wallet.slice(0, 8)}...`);
+
+    if (this.io) {
+      this.io.to(this.roomId).emit("pokemonGameStarted", {
+        roomId: this.roomId,
+        gameState: this.getGameState(),
+        message: "Pokemon battle begins!",
+        battleState: this.getBattleState(),
+      });
+    }
+
+    // Set game timer (15 minutes)
+    this.gameTimer = setTimeout(() => {
+      this.endGame("timeout");
+    }, this.gameDuration);
+  }
+
+  initializePokemonBattle() {
+    // Initialize each player with 3 Pokemon cards for simplified gameplay
+    this.players.forEach((player, index) => {
+      const pokemonTeam = this.generatePokemonTeam(index);
+
+      player.pokemonTeam = pokemonTeam;
+      player.activePokemon = pokemonTeam[0]; // First Pokemon is active
+      player.benchPokemon = pokemonTeam.slice(1); // Rest are on bench
+      player.defeatedPokemon = [];
+      player.remainingPokemon = 3;
+
+      console.log(
+        `🎴 Player ${index + 1} team:`,
+        pokemonTeam.map((p) => p.name)
+      );
+    });
+  }
+
+  generatePokemonTeam(playerIndex) {
+    // Generate different teams for each player using Pokemon TCG API data structure
+    const teams = [
+      // Player 1 Team - Electric/Fire theme
+      [
+        {
+          id: "pikachu-25",
+          name: "Pikachu",
+          hp: 60,
+          maxHp: 60,
+          type: "Electric",
+          attacks: [
+            {
+              name: "Thunder Shock",
+              damage: 20,
+              description: "Electric attack with moderate damage.",
+            },
+            {
+              name: "Agility",
+              damage: 10,
+              description:
+                "Quick attack that may prevent opponent's next move.",
+            },
+          ],
+          imageUrl: "https://images.pokemontcg.io/base1/25_hires.png",
+          rarity: "Common",
+        },
+        {
+          id: "charmander-46",
+          name: "Charmander",
+          hp: 50,
+          maxHp: 50,
+          type: "Fire",
+          attacks: [
+            {
+              name: "Scratch",
+              damage: 10,
+              description: "Basic physical attack.",
+            },
+            { name: "Ember", damage: 30, description: "Powerful fire attack." },
+          ],
+          imageUrl: "https://images.pokemontcg.io/base1/46_hires.png",
+          rarity: "Common",
+        },
+        {
+          id: "magnemite-53",
+          name: "Magnemite",
+          hp: 40,
+          maxHp: 40,
+          type: "Electric",
+          attacks: [
+            {
+              name: "Thunder Wave",
+              damage: 10,
+              description: "May paralyze the opponent.",
+            },
+            {
+              name: "Selfdestruct",
+              damage: 40,
+              description: "Powerful attack that damages self.",
+            },
+          ],
+          imageUrl: "https://images.pokemontcg.io/base1/53_hires.png",
+          rarity: "Common",
+        },
+      ],
+      // Player 2 Team - Water/Grass theme
+      [
+        {
+          id: "squirtle-63",
+          name: "Squirtle",
+          hp: 40,
+          maxHp: 40,
+          type: "Water",
+          attacks: [
+            {
+              name: "Bubble",
+              damage: 10,
+              description: "Water attack that may paralyze.",
+            },
+            {
+              name: "Withdraw",
+              damage: 0,
+              description: "Defensive move that reduces damage.",
+            },
+          ],
+          imageUrl: "https://images.pokemontcg.io/base1/63_hires.png",
+          rarity: "Common",
+        },
+        {
+          id: "bulbasaur-44",
+          name: "Bulbasaur",
+          hp: 40,
+          maxHp: 40,
+          type: "Grass",
+          attacks: [
+            {
+              name: "Leech Seed",
+              damage: 20,
+              description: "Drains opponent's energy.",
+            },
+            {
+              name: "Vine Whip",
+              damage: 15,
+              description: "Basic grass-type attack.",
+            },
+          ],
+          imageUrl: "https://images.pokemontcg.io/base1/44_hires.png",
+          rarity: "Common",
+        },
+        {
+          id: "psyduck-62",
+          name: "Psyduck",
+          hp: 50,
+          maxHp: 50,
+          type: "Water",
+          attacks: [
+            {
+              name: "Headache",
+              damage: 10,
+              description: "Psychic attack that confuses.",
+            },
+            {
+              name: "Fury Swipes",
+              damage: 20,
+              description: "Multiple quick attacks.",
+            },
+          ],
+          imageUrl: "https://images.pokemontcg.io/base1/62_hires.png",
+          rarity: "Common",
+        },
+      ],
+    ];
+
+    return teams[playerIndex] || teams[0];
+  }
+
+  // Pokemon Battle Actions
+  attackPokemon(attackingPlayerId, attackIndex) {
+    const attackingPlayer = this.players.find(
+      (p) => p.id === attackingPlayerId
+    );
+    const defendingPlayer = this.players.find(
+      (p) => p.id !== attackingPlayerId
+    );
+
+    if (!attackingPlayer || !defendingPlayer) {
+      return { success: false, error: "Invalid players" };
+    }
+
+    if (this.gameState.currentTurn !== attackingPlayerId) {
+      return { success: false, error: "Not your turn" };
+    }
+
+    const activePokemon = attackingPlayer.activePokemon;
+    const attack = activePokemon.attacks[attackIndex];
+
+    if (!attack) {
+      return { success: false, error: "Invalid attack" };
+    }
+
+    // Execute attack
+    const damage = attack.damage;
+    defendingPlayer.activePokemon.hp -= damage;
+
+    const battleLog = `${activePokemon.name} used ${attack.name} for ${damage} damage!`;
+
+    console.log(`⚔️ ${battleLog}`);
+    console.log(
+      `   ${defendingPlayer.activePokemon.name} HP: ${defendingPlayer.activePokemon.hp}/${defendingPlayer.activePokemon.maxHp}`
+    );
+
+    // Check if defending Pokemon is knocked out
+    const knockedOut = defendingPlayer.activePokemon.hp <= 0;
+    let gameEnded = false;
+    let winner = null;
+
+    if (knockedOut) {
+      // Move knocked out Pokemon to defeated pile
+      defendingPlayer.defeatedPokemon.push(defendingPlayer.activePokemon);
+      defendingPlayer.remainingPokemon--;
+
+      console.log(`💀 ${defendingPlayer.activePokemon.name} was knocked out!`);
+
+      // Check if player has no Pokemon left
+      if (defendingPlayer.remainingPokemon === 0) {
+        gameEnded = true;
+        winner = attackingPlayer;
+        console.log(
+          `🏆 ${attackingPlayer.wallet.slice(0, 8)}... wins the Pokemon battle!`
+        );
+      } else {
+        // Force defending player to choose new active Pokemon
+        const nextPokemon = defendingPlayer.benchPokemon.shift();
+        if (nextPokemon) {
+          defendingPlayer.activePokemon = nextPokemon;
+          console.log(
+            `🔄 ${defendingPlayer.activePokemon.name} is now active!`
+          );
+        }
+      }
+    }
+
+    // Switch turns
+    this.gameState.currentTurn = defendingPlayer.id;
+    this.gameState.turnCount++;
+
+    const battleResult = {
+      success: true,
+      attack: attack,
+      damage: damage,
+      battleLog: battleLog,
+      knockedOut: knockedOut,
+      gameEnded: gameEnded,
+      winner: winner,
+      newActivePokemon: knockedOut ? defendingPlayer.activePokemon : null,
+    };
+
+    // Broadcast battle update
+    if (this.io) {
+      this.io.to(this.roomId).emit("pokemonBattleAction", {
+        roomId: this.roomId,
+        action: "attack",
+        result: battleResult,
+        gameState: this.getGameState(),
+        battleState: this.getBattleState(),
+      });
+    }
+
+    // End game if someone won
+    if (gameEnded) {
+      setTimeout(() => {
+        this.endGame("victory", winner);
+      }, 2000); // 2 second delay to show final result
+    }
+
+    return battleResult;
+  }
+
+  switchActivePokemon(playerId, benchIndex) {
+    const player = this.players.find((p) => p.id === playerId);
+
+    if (!player) {
+      return { success: false, error: "Player not found" };
+    }
+
+    if (benchIndex >= player.benchPokemon.length) {
+      return { success: false, error: "Invalid Pokemon selection" };
+    }
+
+    // Switch active Pokemon with bench Pokemon
+    const newActive = player.benchPokemon[benchIndex];
+    const currentActive = player.activePokemon;
+
+    player.activePokemon = newActive;
+    player.benchPokemon[benchIndex] = currentActive;
+
+    console.log(
+      `🔄 ${player.wallet.slice(0, 8)}... switched to ${newActive.name}`
+    );
+
+    // Broadcast switch
+    if (this.io) {
+      this.io.to(this.roomId).emit("pokemonBattleAction", {
+        roomId: this.roomId,
+        action: "switch",
+        playerId: playerId,
+        newActivePokemon: newActive,
+        gameState: this.getGameState(),
+        battleState: this.getBattleState(),
+      });
+    }
+
+    return { success: true, newActivePokemon: newActive };
+  }
+
+  getBattleState() {
+    return {
+      player1: {
+        id: this.players[0].id,
+        wallet: this.players[0].wallet,
+        activePokemon: this.players[0].activePokemon,
+        benchPokemon: this.players[0].benchPokemon,
+        defeatedPokemon: this.players[0].defeatedPokemon,
+        remainingPokemon: this.players[0].remainingPokemon,
+      },
+      player2: {
+        id: this.players[1].id,
+        wallet: this.players[1].wallet,
+        activePokemon: this.players[1].activePokemon,
+        benchPokemon: this.players[1].benchPokemon,
+        defeatedPokemon: this.players[1].defeatedPokemon,
+        remainingPokemon: this.players[1].remainingPokemon,
+      },
+      currentTurn: this.gameState.currentTurn,
+      turnCount: this.gameState.turnCount,
+    };
+  }
+
+  async endGame(reason = "normal", winner = null) {
+    this.gamePhase = "finished";
+
+    if (this.gameTimer) {
+      clearTimeout(this.gameTimer);
+    }
+    if (this.countdownTimer) {
+      clearTimeout(this.countdownTimer);
+    }
+
+    // Determine winner if not provided
+    if (!winner) {
+      if (reason === "timeout") {
+        // If timeout, player with most remaining Pokemon wins
+        const sortedPlayers = [...this.players].sort(
+          (a, b) => b.remainingPokemon - a.remainingPokemon
+        );
+        winner = sortedPlayers[0];
+      } else {
+        // Calculate winner (highest score for other cases)
+        const sortedPlayers = [...this.players].sort(
+          (a, b) => b.score - a.score
+        );
+        winner = sortedPlayers[0];
+      }
+    }
+
+    console.log(`🏁 Pokemon battle finished in room ${this.roomId}`);
+    console.log(`   Reason: ${reason}`);
+    console.log(`   Winner: ${winner.wallet.slice(0, 8)}...`);
+
+    // Distribute prizes - Winner takes all!
+    await this.distributePrizes(winner);
+
+    if (this.io) {
+      this.io.to(this.roomId).emit("pokemonGameFinished", {
+        roomId: this.roomId,
+        winner: {
+          id: winner.id,
+          wallet: winner.wallet,
+          nickname: winner.nickname,
+          remainingPokemon: winner.remainingPokemon,
+        },
+        finalState: this.getBattleState(),
+        reason: reason,
+        prizeAmount: this.totalEscrowed * 0.9, // 90% to winner
+        message: `🏆 ${winner.nickname} wins the Pokemon battle and ${(
+          this.totalEscrowed * 0.9
+        ).toFixed(2)} GOR!`,
+      });
+    }
+
+    // Clean up room after 30 seconds
+    setTimeout(() => {
+      this.cleanup();
+    }, 30000);
+  }
+
+  async distributePrizes(winner) {
+    try {
+      const totalPrizePool = this.totalEscrowed;
+      const platformFee = totalPrizePool * 0.1;
+      const winnerPrize = totalPrizePool * 0.9;
+
+      console.log(`💰 Distributing Pokemon prizes:
+        Total Pool: ${totalPrizePool} GOR
+        Winner Prize: ${winnerPrize} GOR
+        Platform Fee: ${platformFee} GOR`);
+
+      // Send prize to winner
+      await this.sendPrizeToPlayer(winner.wallet, winnerPrize);
+
+      console.log(`✅ Pokemon prizes distributed successfully`);
+    } catch (error) {
+      console.error("❌ Pokemon prize distribution error:", error);
+    }
+  }
+
+  async sendPrizeToPlayer(winnerWallet, amount) {
+    try {
+      if (!platformWallet) {
+        throw new Error("Platform wallet not configured");
+      }
+
+      const winnerPublicKey = new PublicKey(winnerWallet);
+      const lamports = Math.floor(amount * Math.pow(10, GOR_DECIMALS));
+
+      console.log(`💰 Transferring ${amount} GOR to ${winnerWallet}...`);
+
+      const transferTx = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: platformWallet.publicKey,
+          toPubkey: winnerPublicKey,
+          lamports: lamports,
+        })
+      );
+
+      const signature = await sendAndConfirmTransaction(
+        connection,
+        transferTx,
+        [platformWallet],
+        {
+          commitment: "confirmed",
+          maxRetries: 3,
+        }
+      );
+
+      console.log(
+        `✅ Pokemon prize transferred successfully! TX: ${signature}`
+      );
+      return { success: true, signature: signature };
+    } catch (error) {
+      console.error(`❌ Pokemon prize transfer failed:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  cleanup() {
+    if (this.countdownTimer) {
+      clearTimeout(this.countdownTimer);
+    }
+    if (this.gameTimer) {
+      clearTimeout(this.gameTimer);
+    }
+
+    // Remove room from storage
+    realWalletPokemonRooms.delete(this.roomId);
+    console.log(`🗑️ Pokemon room ${this.roomId} cleaned up`);
+  }
+
+  getGameState() {
+    const gameState = {
+      roomId: this.roomId,
+      gamePhase: this.gamePhase,
+      playerCount: this.playerCount,
+      betAmount: this.betAmount,
+      totalEscrowed: this.totalEscrowed,
+      players: this.players.map((p) => ({
+        id: p.id,
+        wallet: p.wallet,
+        nickname: p.nickname,
+        ready: p.ready,
+        paymentConfirmed: p.paymentConfirmed,
+        score: p.score,
+        hp: p.hp,
+      })),
+      gameState: this.gameState,
+      maxPlayers: this.maxPlayers,
+    };
+
+    // Add battle state if game is playing
+    if (this.gamePhase === "playing" && this.players.length >= 2) {
+      gameState.battleState = this.getBattleState();
+    }
+
+    return gameState;
+  }
+}
+
 // Store io instance for broadcasting from room classes
 let realWalletIo = null;
 
@@ -2097,6 +2849,282 @@ export function setupRealWalletRoutes(app, io) {
       }
     });
 
+    // Real Pokemon Card Events
+    socket.on("createPokemonRoom", async (data) => {
+      try {
+        const {
+          roomId,
+          password,
+          entryAmount,
+          maxPlayers,
+          playerWallet,
+          txSignature,
+        } = data;
+
+        const betAmount = entryAmount;
+        const playerCount = maxPlayers;
+        const wallet = playerWallet;
+
+        // Only handle real wallet addresses (not demo/mock)
+        if (
+          !wallet ||
+          wallet.startsWith("demo_") ||
+          wallet.startsWith("mock_")
+        ) {
+          return;
+        }
+
+        console.log(`🎴 Creating Pokemon room:`, {
+          roomId,
+          betAmount,
+          playerCount,
+          wallet: wallet.slice(0, 8) + "...",
+        });
+
+        // Check if room already exists
+        if (realWalletPokemonRooms.has(roomId)) {
+          socket.emit("error", { message: "Room already exists" });
+          return;
+        }
+
+        // IMPORTANT: Only create room AFTER successful payment
+        if (!txSignature) {
+          socket.emit("error", { message: "Transaction signature required" });
+          return;
+        }
+
+        // First verify payment BEFORE creating room
+        console.log(`🔍 Verifying payment before creating Pokemon room...`);
+
+        // Create temporary room instance to verify payment
+        const tempRoom = new RealWalletPokemonRoom(
+          roomId,
+          betAmount,
+          playerCount,
+          password,
+          io
+        );
+        const paymentValid = await tempRoom.verifyPaymentTransaction(
+          wallet,
+          txSignature,
+          betAmount
+        );
+
+        if (!paymentValid) {
+          console.log(
+            `❌ Payment verification failed for Pokemon room creation`
+          );
+          socket.emit("error", { message: "Payment verification failed" });
+          return;
+        }
+
+        console.log(`✅ Payment verified, creating Pokemon room ${roomId}`);
+
+        // NOW create and store the room after successful payment
+        const room = new RealWalletPokemonRoom(
+          roomId,
+          betAmount,
+          playerCount,
+          password,
+          io // 🚨 CRITICAL: Pass socket.io instance for broadcasting
+        );
+        realWalletPokemonRooms.set(roomId, room);
+
+        // Add creator to room
+        await room.addPlayer(socket.id, socket.id, wallet, betAmount);
+        socket.join(roomId);
+
+        realWalletPlayerSockets.set(socket.id, {
+          playerId: socket.id,
+          wallet: wallet,
+          currentRoom: roomId,
+          roomType: "realPokemon",
+        });
+
+        // Confirm payment (already verified)
+        const result = await room.confirmPayment(socket.id, txSignature);
+        if (result.success) {
+          console.log(
+            `✅ Pokemon room creator payment confirmed for ${roomId}`
+          );
+        } else {
+          console.log(
+            `❌ Pokemon room creator payment failed: ${result.error}`
+          );
+          // Clean up failed room
+          realWalletPokemonRooms.delete(roomId);
+          realWalletPlayerSockets.delete(socket.id);
+          socket.emit("error", { message: result.error });
+          return;
+        }
+
+        socket.emit("pokemonRoomCreated", {
+          success: true,
+          roomId: roomId,
+          gameState: room.getGameState(),
+        });
+
+        console.log(`✅ Pokemon room ${roomId} created successfully`);
+      } catch (error) {
+        console.error("❌ Pokemon room creation error:", error);
+        socket.emit("error", { message: error.message });
+      }
+    });
+
+    socket.on("joinPokemonRoom", async (data) => {
+      try {
+        const { roomId, password, playerWallet, txSignature } = data;
+
+        const wallet = playerWallet;
+
+        // Only handle real wallet addresses
+        if (
+          !wallet ||
+          wallet.startsWith("demo_") ||
+          wallet.startsWith("mock_")
+        ) {
+          return;
+        }
+
+        console.log(`🎴 Joining Pokemon room:`, {
+          roomId,
+          wallet: wallet.slice(0, 8) + "...",
+        });
+
+        const room = realWalletPokemonRooms.get(roomId);
+        if (!room) {
+          socket.emit("error", { message: "Room not found" });
+          return;
+        }
+
+        // Verify password if required
+        if (!room.verifyPassword(password)) {
+          socket.emit("error", { message: "Invalid room password" });
+          return;
+        }
+
+        // Add player to room
+        await room.addPlayer(socket.id, socket.id, wallet, room.betAmount);
+        socket.join(roomId);
+
+        realWalletPlayerSockets.set(socket.id, {
+          playerId: socket.id,
+          wallet: wallet,
+          currentRoom: roomId,
+          roomType: "realPokemon",
+        });
+
+        // Confirm payment if transaction signature provided
+        if (txSignature) {
+          const result = await room.confirmPayment(socket.id, txSignature);
+          if (result.success) {
+            console.log(
+              `✅ Pokemon player payment confirmed for room ${roomId}`
+            );
+          } else {
+            console.log(`❌ Pokemon player payment failed: ${result.error}`);
+            socket.emit("paymentError", result.error);
+            return;
+          }
+        }
+
+        socket.emit("pokemonRoomJoined", {
+          success: true,
+          roomId: roomId,
+          gameState: room.getGameState(),
+        });
+
+        // Broadcast updated game state to all players in room
+        io.to(roomId).emit("pokemonGameState", room.getGameState());
+
+        console.log(`✅ Player joined Pokemon room ${roomId}`);
+      } catch (error) {
+        console.error("❌ Pokemon room join error:", error);
+        socket.emit("error", { message: error.message });
+      }
+    });
+
+    socket.on("confirmPokemonPayment", async (data) => {
+      try {
+        const playerInfo = realWalletPlayerSockets.get(socket.id);
+        if (!playerInfo || playerInfo.roomType !== "realPokemon") return;
+
+        const { txSignature } = data;
+        console.log(`💰 Pokemon payment confirmation:`, {
+          txSignature,
+          roomId: playerInfo.currentRoom,
+        });
+
+        const room = realWalletPokemonRooms.get(playerInfo.currentRoom);
+        if (room) {
+          const result = await room.confirmPayment(socket.id, txSignature);
+          if (result.success) {
+            io.to(room.roomId).emit("pokemonGameState", room.getGameState());
+            console.log(`✅ Pokemon payment confirmed for room ${room.roomId}`);
+          } else {
+            socket.emit("paymentError", result.error);
+            console.log(`❌ Pokemon payment failed: ${result.error}`);
+          }
+        }
+      } catch (error) {
+        console.error("❌ Pokemon payment confirmation error:", error);
+        socket.emit("paymentError", error.message);
+      }
+    });
+
+    // Pokemon Battle Actions
+    socket.on("pokemonAttack", (data) => {
+      try {
+        const playerInfo = realWalletPlayerSockets.get(socket.id);
+        if (!playerInfo || playerInfo.roomType !== "realPokemon") return;
+
+        const { attackIndex } = data;
+        console.log(`⚔️ Pokemon attack:`, {
+          attackIndex,
+          player: playerInfo.wallet.slice(0, 8) + "...",
+          roomId: playerInfo.currentRoom,
+        });
+
+        const room = realWalletPokemonRooms.get(playerInfo.currentRoom);
+        if (room) {
+          const result = room.attackPokemon(socket.id, attackIndex);
+          if (!result.success) {
+            socket.emit("pokemonError", { message: result.error });
+          }
+          // Battle result is already broadcasted in the attackPokemon method
+        }
+      } catch (error) {
+        console.error("❌ Pokemon attack error:", error);
+        socket.emit("pokemonError", { message: error.message });
+      }
+    });
+
+    socket.on("pokemonSwitch", (data) => {
+      try {
+        const playerInfo = realWalletPlayerSockets.get(socket.id);
+        if (!playerInfo || playerInfo.roomType !== "realPokemon") return;
+
+        const { benchIndex } = data;
+        console.log(`🔄 Pokemon switch:`, {
+          benchIndex,
+          player: playerInfo.wallet.slice(0, 8) + "...",
+          roomId: playerInfo.currentRoom,
+        });
+
+        const room = realWalletPokemonRooms.get(playerInfo.currentRoom);
+        if (room) {
+          const result = room.switchActivePokemon(socket.id, benchIndex);
+          if (!result.success) {
+            socket.emit("pokemonError", { message: result.error });
+          }
+          // Switch result is already broadcasted in the switchActivePokemon method
+        }
+      } catch (error) {
+        console.error("❌ Pokemon switch error:", error);
+        socket.emit("pokemonError", { message: error.message });
+      }
+    });
+
     // Cleanup on disconnect
     socket.on("disconnect", () => {
       console.log(`🔗 Real wallet client disconnected: ${socket.id}`);
@@ -2112,6 +3140,17 @@ export function setupRealWalletRoutes(app, io) {
             );
             room.cleanup();
             realWalletWordGridRooms.delete(playerInfo.currentRoom);
+          }
+        }
+
+        // Clean up Pokemon room if needed
+        if (playerInfo.roomType === "realPokemon") {
+          const room = realWalletPokemonRooms.get(playerInfo.currentRoom);
+          if (room) {
+            console.log(
+              `🎴 Cleaning up Pokemon room ${playerInfo.currentRoom} due to disconnect`
+            );
+            room.cleanup();
           }
         }
 

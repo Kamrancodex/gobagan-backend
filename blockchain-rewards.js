@@ -1,6 +1,9 @@
 // Real Blockchain Prize Distribution System
 // Replaces the fake logging with actual GOR transfers
 
+import dotenv from "dotenv";
+dotenv.config(); // 🚨 CRITICAL: Load environment variables first!
+
 import {
   Connection,
   PublicKey,
@@ -16,12 +19,33 @@ const GORBAGANA_RPC = "https://rpc.gorbagana.wtf/";
 const connection = new Connection(GORBAGANA_RPC, "processed");
 
 // Platform wallet for signing transactions (should be environment variable)
-const PLATFORM_PRIVATE_KEY = process.env.PLATFORM_PRIVATE_KEY || ""; // Base58 encoded private key
+const PLATFORM_PRIVATE_KEY = process.env.PLATFORM_PRIVATE_KEY || ""; // JSON array or base58 encoded private key
 let platformWallet = null;
+
+console.log("🔍 [blockchain-rewards] Environment check on import:");
+console.log(
+  `   PLATFORM_PRIVATE_KEY exists: ${!!process.env.PLATFORM_PRIVATE_KEY}`
+);
+console.log(
+  `   PLATFORM_PRIVATE_KEY length: ${
+    process.env.PLATFORM_PRIVATE_KEY?.length || 0
+  }`
+);
 
 // Initialize platform wallet
 function initializePlatformWallet() {
+  console.log("🔍 [blockchain-rewards] Checking PLATFORM_PRIVATE_KEY...");
+  console.log(
+    `   Environment variable exists: ${!!process.env.PLATFORM_PRIVATE_KEY}`
+  );
+  console.log(
+    `   Variable length: ${process.env.PLATFORM_PRIVATE_KEY?.length || 0}`
+  );
+
   if (!PLATFORM_PRIVATE_KEY) {
+    console.log(
+      "❌ [blockchain-rewards] No PLATFORM_PRIVATE_KEY found in environment"
+    );
     console.log("🔑 Platform wallet will be initialized when needed");
     return null;
   }
@@ -31,20 +55,27 @@ function initializePlatformWallet() {
 
     // Try JSON format first (array of numbers)
     if (PLATFORM_PRIVATE_KEY.startsWith("[")) {
+      console.log(
+        "📋 [blockchain-rewards] Parsing JSON array format private key"
+      );
       const privateKeyBytes = JSON.parse(PLATFORM_PRIVATE_KEY);
       secretKey = new Uint8Array(privateKeyBytes);
     } else {
+      console.log("📋 [blockchain-rewards] Parsing base58 format private key");
       // Try base58 format
       secretKey = bs58.decode(PLATFORM_PRIVATE_KEY);
     }
 
     platformWallet = Keypair.fromSecretKey(secretKey);
     console.log(
-      `🔑 Platform wallet loaded: ${platformWallet.publicKey.toBase58()}`
+      `✅ [blockchain-rewards] Platform wallet loaded: ${platformWallet.publicKey.toBase58()}`
     );
     return platformWallet;
   } catch (error) {
-    console.error("❌ Failed to load platform wallet:", error);
+    console.error(
+      "❌ [blockchain-rewards] Failed to load platform wallet:",
+      error
+    );
     console.error(
       "   Make sure PLATFORM_PRIVATE_KEY is in correct format (JSON array or base58)"
     );
